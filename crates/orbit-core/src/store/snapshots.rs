@@ -12,6 +12,7 @@ use super::{EventStore, load_head};
 use crate::domain::canonical::to_canonical_string;
 use crate::domain::{Digest, Sequence, StreamId, Timestamp};
 use crate::error::{Result, SnapshotConflict, StoreError, ValidationError};
+use crate::fault::FaultPoint;
 use crate::snapshot::{
     MAX_SNAPSHOT_STATE_BYTES, ProjectionKey, RawSnapshotRecord, Snapshot, SnapshotCheck,
     SnapshotDigestInput, SnapshotId, SnapshotProblem,
@@ -85,6 +86,7 @@ impl EventStore {
         }
         .compute();
 
+        self.fault(FaultPoint::SnapshotBeforeBegin)?;
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let head = load_head(&tx, &new.stream_id)?
@@ -106,6 +108,7 @@ impl EventStore {
             )));
         }
 
+        self.fault(FaultPoint::SnapshotAfterValidation)?;
         let inserted = tx.execute(
             "INSERT INTO snapshots (snapshot_id, stream_id, sequence, projection_id,
                                     projection_version, event_digest, state, state_digest, created_at)
@@ -124,6 +127,7 @@ impl EventStore {
             ],
         )?;
         if inserted == 1 {
+            self.fault(FaultPoint::SnapshotBeforeCommit)?;
             tx.commit()?;
             tracing::debug!(stream = %new.stream_id, sequence = %new.sequence,
                 projection = %new.projection, snapshot = %id, "saved snapshot");
@@ -264,7 +268,16 @@ impl EventStore {
     }
 }
 
-fn check_raw(conn: &Connection, raw: &RawSnapshotRecord) -> Result<SnapshotCheck> {
+/// Every snapshot row, in id order.
+pub(super) fn all_raw_snapshots(conn: &Connection) -> Result<Vec<RawSnapshotRecord>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots ORDER BY snapshot_id"
+    ))?;
+    let rows = statement.query_map([], read_raw_snapshot)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(super) fn check_raw(conn: &Connection, raw: &RawSnapshotRecord) -> Result<SnapshotCheck> {
     let unusable = |problem| SnapshotCheck::Unusable {
         sequence: raw.sequence,
         problem,

@@ -43,3 +43,4 @@ jobs:
         run: |
           cargo run -p orbit-core --example quickstart --locked
           cargo run -p orbit-core --example time_travel --locked
+          cargo run -p orbit-core --example crash_lab --locked

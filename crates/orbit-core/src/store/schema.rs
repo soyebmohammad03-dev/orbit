@@ -14,7 +14,7 @@ use crate::error::{Result, StoreError};
 pub(crate) const APPLICATION_ID: i64 = 0x4F52_4254;
 
 /// Ordered migrations; index `i` upgrades the schema from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
 
 /// Newest schema version known to this build.
 pub(crate) const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -138,6 +138,80 @@ BEGIN
     SELECT RAISE(ABORT, 'orbit: snapshots are immutable');
 END;
 ";
+
+/// Replay runs and their executions (Phase 3).
+///
+/// * a run pins a historical interval `(from_sequence, to_sequence]` of one
+///   stream by the digests of its boundary events, plus the starting state,
+///   the expected final state, and a trace of the state digest after every
+///   event (32 bytes each), all covered by `record_digest`;
+/// * runs and executions are immutable; executions are an append-only log
+///   of re-executions and are deleted with their run;
+/// * `start_snapshot_id` is provenance only and deliberately not a foreign
+///   key: snapshots are derived data and may be deleted.
+const MIGRATION_3: &str = r"
+CREATE TABLE replay_runs (
+    run_id                BLOB    NOT NULL PRIMARY KEY CHECK (length(run_id) = 16),
+    stream_id             TEXT    NOT NULL REFERENCES streams (stream_id) ON DELETE RESTRICT,
+    projection_id         TEXT    NOT NULL CHECK (length(projection_id) BETWEEN 1 AND 128),
+    projection_version    INTEGER NOT NULL CHECK (projection_version BETWEEN 1 AND 4294967295),
+    from_sequence         INTEGER NOT NULL CHECK (from_sequence >= 0),
+    to_sequence           INTEGER NOT NULL CHECK (to_sequence >= from_sequence),
+    from_event_digest     BLOB    NOT NULL CHECK (length(from_event_digest) = 32),
+    to_event_digest       BLOB    NOT NULL CHECK (length(to_event_digest) = 32),
+    start_source          TEXT    NOT NULL CHECK (start_source IN ('initial', 'snapshot', 'reconstructed')),
+    start_snapshot_id     BLOB    CHECK (start_snapshot_id IS NULL OR length(start_snapshot_id) = 16),
+    start_state           TEXT    NOT NULL CHECK (json_valid(start_state)),
+    start_state_digest    BLOB    NOT NULL CHECK (length(start_state_digest) = 32),
+    expected_state        TEXT    NOT NULL CHECK (json_valid(expected_state)),
+    expected_state_digest BLOB    NOT NULL CHECK (length(expected_state_digest) = 32),
+    trace                 BLOB    NOT NULL CHECK (length(trace) = 32 * (to_sequence - from_sequence)),
+    created_at            INTEGER NOT NULL CHECK (created_at >= 0),
+    record_digest         BLOB    NOT NULL CHECK (length(record_digest) = 32),
+    CHECK (start_source <> 'initial' OR (from_sequence = 0 AND start_snapshot_id IS NULL)),
+    CHECK (start_source <> 'snapshot' OR start_snapshot_id IS NOT NULL)
+) STRICT;
+
+CREATE INDEX replay_runs_by_stream ON replay_runs (stream_id, created_at);
+
+CREATE TABLE replay_executions (
+    execution_id        BLOB    NOT NULL PRIMARY KEY CHECK (length(execution_id) = 16),
+    run_id              BLOB    NOT NULL REFERENCES replay_runs (run_id) ON DELETE CASCADE,
+    executed_at         INTEGER NOT NULL CHECK (executed_at >= 0),
+    outcome             TEXT    NOT NULL CHECK (outcome IN ('exact_match', 'reconverged', 'diverged',
+                                    'projection_failed', 'unavailable', 'invalid_input', 'integrity_failure')),
+    actual_state_digest BLOB    CHECK (actual_state_digest IS NULL OR length(actual_state_digest) = 32),
+    report              TEXT    NOT NULL CHECK (json_valid(report) AND json_type(report) = 'object')
+) STRICT;
+
+CREATE INDEX replay_executions_by_run ON replay_executions (run_id, executed_at);
+
+CREATE TRIGGER replay_runs_no_update
+BEFORE UPDATE ON replay_runs
+BEGIN
+    SELECT RAISE(ABORT, 'orbit: replay runs are immutable');
+END;
+
+CREATE TRIGGER replay_executions_no_update
+BEFORE UPDATE ON replay_executions
+BEGIN
+    SELECT RAISE(ABORT, 'orbit: replay executions are immutable');
+END;
+";
+
+/// Protective triggers every current-schema database must have. Their absence
+/// means the file was modified outside ORBIT.
+pub(crate) const SAFEGUARD_TRIGGERS: &[&str] = &[
+    "events_insert_extends_head",
+    "events_no_delete",
+    "events_no_update",
+    "replay_executions_no_update",
+    "replay_runs_no_update",
+    "snapshots_insert_matches_history",
+    "snapshots_no_update",
+    "streams_head_only_advances",
+    "streams_no_delete",
+];
 
 /// Opens the database file, applies connection settings and migrations.
 pub(crate) fn open(config: &StoreConfig) -> Result<Connection> {

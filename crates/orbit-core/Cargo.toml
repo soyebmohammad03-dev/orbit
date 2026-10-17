@@ -16,7 +16,14 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 uuid = { version = "1.28.0", features = ["v7", "serde"] }
 
+[features]
+# Enables `EventStore::set_fault_hook` for deterministic fault-injection tests.
+# Off by default: production builds contain no hook. The test suite turns it on
+# through the self dev-dependency below.
+fault-injection = []
+
 [dev-dependencies]
+orbit-core = { path = ".", features = ["fault-injection"] }
 criterion = "0.8.2"
 proptest = "1.12.0"
 tempfile = "3.27.0"
@@ -30,4 +37,8 @@ workspace = true
 
 [[bench]]
 name = "reconstruction"
+harness = false
+
+[[bench]]
+name = "crash_lab"
 harness = false

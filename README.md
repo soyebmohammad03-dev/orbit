@@ -2,13 +2,15 @@
 
 **ORBIT is a persistent event store being built toward a time-travel
 debugging platform.** It records what happened to a system as ordered,
-append-only, integrity-checked event streams. Later phases will reconstruct,
-compare and replay historical state from those streams.
+append-only, integrity-checked event streams. From those streams it
+reconstructs, compares and deterministically replays historical state.
 
-> **Status: Phases 1 and 2 of 5 are complete.** Phase 1 is the core event
-> engine and persistence. Phase 2 is historical state reconstruction,
-> snapshots and state diffs. ORBIT is pre-release, the API may change, and it is
-> not production-ready.
+> **Status: Phases 1–3 of 5 are complete.** Phase 1 is the core event engine
+> and persistence. Phase 2 is historical state reconstruction, snapshots and
+> state diffs. Phase 3 is crash recovery, concurrency guarantees, integrity
+> diagnostics and deterministic replay. There is no HTTP API or web dashboard
+> yet; those are planned for Phase 4. ORBIT is pre-release, the API may
+> change, and it is not production-ready.
 
 ## Problem
 
@@ -66,11 +68,46 @@ state, diffs two of them, and names the events responsible for each change.
   applied, rejected snapshots, and timing. `explain` attributes every change
   to the event that caused it.
 
+## Implemented in Phase 3
+
+- **Recovery guarantees, tested by fault injection.** Every write is one
+  transaction. Deterministic fault points at each transaction boundary (the
+  `fault-injection` cargo feature, off by default) show that no failed
+  operation leaves committed state. Real child-process crashes (`abort()` at
+  chosen points, and `SIGKILL` during appends) show that reopening recovers
+  every committed event and nothing else. Power loss is *not* simulated.
+- **Concurrency invariants under stress.** Multi-connection and multi-process
+  tests run blind writers, optimistic writers with retry, readers and
+  snapshotters at once. They check that streams stay dense, that every
+  acknowledged append is stored exactly once, that conflicts are reported
+  correctly, and that snapshots are consistent.
+- **Integrity diagnostics.**
+  - `verify_store` runs SQLite's integrity check and covers foreign keys,
+    missing protective triggers, every stream, snapshot and replay run.
+  - Issues are categorised (modified event, broken chain, invalid genesis,
+    sequence continuity, head inconsistency, …) and name the affected event ids.
+  - **Trusted checkpoints** detect even a history rewritten with recomputed
+    unkeyed digests.
+  - `StoreError::class()` separates retryable failures from integrity violations.
+- **Deterministic replay.** `ReplayLab` records self-contained replay runs
+  (schema v3) with a per-event state-digest trace, re-executes them with the
+  current projection, and persists every execution.
+- **Divergence detection.** Outcomes are classified as exact match,
+  reconverged, diverged, projection failed, unavailable (for example a
+  projection version mismatch, which is never substituted), invalid input, or
+  integrity failure. ORBIT reports the first event after which the state
+  diverged, and the final-state diff.
+- **Experiments.** `ReplayLab::experiment` produces one structured report:
+  integrity, snapshot-assisted versus full replay, the replay outcome, state
+  digests and timings.
+
 ## Tests and benchmarks
 
-41 unit tests, 86 integration tests (including 7 property-based tests) and 4
-doc tests, two of which compile this README's examples. Criterion benchmarks
-cover the event store and reconstruction.
+42 unit tests, 125 integration tests and 4 doc tests (two of them compile this
+README's examples). The integration tests include 9 property-based tests and 2
+child-process entry points that do nothing in a normal run. Criterion suites
+cover the event store, reconstruction, and Phase 3's concurrency, verification,
+replay and failure paths.
 
 ## Architecture
 
@@ -83,8 +120,10 @@ crates/orbit-core
 ├── reconstruct  Reconstructor: historical state, snapshot use, diff, explain
 ├── snapshot     snapshot types, snapshot digest, validation outcomes
 ├── diff         structural JSON diff
+├── replay       ReplayLab: replay runs, executions, divergence, experiments
+├── fault        fault points (hooks with the `fault-injection` feature)
 ├── config       StoreConfig, Durability, Limits, env loading
-└── error        StoreError, ValidationError
+└── error        StoreError, ErrorClass, ValidationError
 ```
 
 Only `store` knows about SQLite. Projection logic never touches storage, and
@@ -105,11 +144,12 @@ Prerequisites: stable Rust (tested with 1.99.1) and a C compiler (on macOS,
 `xcode-select --install`).
 
 ```bash
-git clone <repository-url> ORBIT && cd ORBIT
+git clone https://github.com/soyebmohammad03-dev/orbit.git && cd orbit
 cargo build
 cargo test
 cargo run -p orbit-core --example quickstart
 cargo run -p orbit-core --example time_travel
+cargo run -p orbit-core --example crash_lab
 ```
 
 ### Minimal example
@@ -176,6 +216,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps
 cargo bench -p orbit-core --bench event_store          # ~1 minute
 cargo bench -p orbit-core --bench reconstruction        # ~1.5 minutes
+cargo bench -p orbit-core --bench crash_lab             # ~2 minutes
 ```
 
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) maps each test to what it covers. It
@@ -190,14 +231,14 @@ their hardware and conditions.
 ├── crates/orbit-core/
 │   ├── src/                   library source
 │   ├── tests/                 integration and property tests (real SQLite files)
-│   │   └── fixtures/          schema v1 database dump for migration tests
-│   ├── benches/               event_store.rs, reconstruction.rs (Criterion)
-│   └── examples/              quickstart.rs, time_travel.rs
+│   │   └── fixtures/          schema v1 and v2 database dumps for migration tests
+│   ├── benches/               event_store.rs, reconstruction.rs, crash_lab.rs (Criterion)
+│   └── examples/              quickstart.rs, time_travel.rs, crash_lab.rs
 ├── docs/
 │   ├── ARCHITECTURE.md  EVENT_MODEL.md  STORAGE_DESIGN.md  DEVELOPMENT.md
-│   ├── RECONSTRUCTION.md  SNAPSHOTS.md
+│   ├── RECONSTRUCTION.md  SNAPSHOTS.md  RECOVERY.md  REPLAY.md
 │   └── adr/                   architecture decision records
-└── .github/workflows/ci.yml   fmt, check, clippy, test, doc, bench build (Linux + macOS)
+└── .github/workflows/ci.yml   fmt, check, clippy, test, doc, bench build, examples (Linux + macOS)
 ```
 
 ## Current limitations
@@ -205,13 +246,17 @@ their hardware and conditions.
 - Single-event appends only. There is no atomic multi-event batch append yet.
 - One connection per `EventStore`. Calls through one instance are serialised,
   and SQLite allows one writer per file.
-- Digests are **unkeyed**. They detect corruption and naive edits, but not an
-  attacker who rewrites the file and recomputes every hash. See
-  [STORAGE_DESIGN.md](docs/STORAGE_DESIGN.md#integrity-verification).
-- There is no stream listing, deletion or archival, and no global
-  (cross-stream) ordering.
-- Durability rests on SQLite's guarantees. Crash and fault-injection testing
-  is planned for Phase 3.
+- Digests are **unkeyed**. On their own they detect corruption and naive edits,
+  but not an attacker who rewrites the file and recomputes every hash. Trusted
+  checkpoints kept outside the database detect such rewrites up to the
+  checkpoint. There are no keys or signatures. See
+  [RECOVERY.md](docs/RECOVERY.md#integrity-threat-model).
+- There is no stream deletion or archival, and no global (cross-stream) ordering.
+- Process crashes are tested. OS crashes and power loss are not simulated, and
+  durability under them rests on SQLite and the storage device.
+- No replication, consensus, or multi-host access. One host, local files.
+- Replay runs are capped at 100,000 events. Divergence is localised to the
+  first event whose resulting state differs, which is not necessarily its cause.
 - Local files only. The database must not be on a network file system.
 - Synchronous API. The future async server will call it through `spawn_blocking`.
 - Projections are Rust code compiled into the application. Reconstruction runs
@@ -227,11 +272,11 @@ their hardware and conditions.
 |-------|-------|--------|
 | 1 | Core event engine and persistence | **done** |
 | 2 | Historical state reconstruction, snapshots and state diffs | **done** |
-| 3 | Crash recovery, concurrency control, integrity auditing, deterministic replay and divergence diagnostics | planned |
+| 3 | Crash recovery, concurrency control, integrity auditing, deterministic replay and divergence diagnostics | **done** |
 | 4 | Backend API (Axum) and web observability frontend | planned |
 | 5 | Test hardening, reproducible benchmarks, documentation, release | planned |
 
-Phases 3–5 are planned work and do not exist yet.
+Phases 4 and 5 are planned work and do not exist yet. That includes the HTTP API, the web dashboard and the release.
 
 ## Contributing, security, license
 

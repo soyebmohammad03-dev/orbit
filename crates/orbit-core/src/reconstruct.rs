@@ -595,6 +595,46 @@ impl<'s, P: Projection> Reconstructor<'s, P> {
 
     // ---------------------------------------------------------------------
 
+    /// Folds events after `start` up to and including `target` onto `state`,
+    /// with the same continuity checks as [`reconstruct`](Self::reconstruct).
+    /// `hook` runs after every applied event. Used by replay.
+    pub(crate) fn fold_from(
+        &self,
+        stream: &StreamId,
+        state: P::State,
+        start: crate::domain::StreamHead,
+        target: Sequence,
+        hook: impl FnMut(&StoredEvent, &P::State) -> Result<(), ReconstructionError>,
+    ) -> Result<(P::State, crate::domain::StreamHead), ReconstructionError> {
+        let run = Run {
+            state,
+            sequence: start.sequence,
+            digest: start.digest,
+            report: ReconstructionReport {
+                stream_id: stream.clone(),
+                projection: self.projection.key(),
+                requested: Target::At(target),
+                head_at_start: target,
+                reconstructed: start.sequence,
+                reconstructed_digest: start.digest,
+                start: StartPoint::Initial,
+                events_applied: 0,
+                applied: Vec::new(),
+                snapshot_warnings: Vec::new(),
+                elapsed_micros: 0,
+            },
+            started: Instant::now(),
+        };
+        let run = self.advance(stream, run, target, false, hook)?;
+        Ok((
+            run.state,
+            crate::domain::StreamHead {
+                sequence: run.sequence,
+                digest: run.digest,
+            },
+        ))
+    }
+
     /// Establishes the start point and folds up to the resolved target.
     fn reconstruct_run(
         &self,

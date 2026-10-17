@@ -135,6 +135,24 @@ pub enum IntegrityIssue {
         /// Description of the defect.
         reason: String,
     },
+    /// The first event's `prev_digest` is not the genesis value (32 zero
+    /// bytes). Reported instead of `ChainBroken` for sequence 1.
+    InvalidGenesis {
+        /// The `prev_digest` stored on event 1.
+        stored_prev: Digest,
+    },
+    /// A trusted checkpoint (see [`StreamCheckpoint`]) does not match the
+    /// stored history: the event at the checkpoint's sequence is missing or
+    /// has a different digest. This also catches a history that was
+    /// rewritten with consistently recomputed digests.
+    CheckpointMismatch {
+        /// Checkpoint sequence.
+        sequence: Sequence,
+        /// Digest recorded in the checkpoint.
+        expected: Digest,
+        /// Digest of the stored event, or `None` if it does not exist.
+        actual: Option<Digest>,
+    },
     /// The head recorded on the stream does not match its last event.
     HeadMismatch {
         /// Head sequence recorded on the stream row.
@@ -146,6 +164,87 @@ pub enum IntegrityIssue {
         /// Stored digest of the last event actually present.
         observed_digest: Digest,
     },
+}
+
+/// Coarse classification of an [`IntegrityIssue`], stable for API consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityCategory {
+    /// A hashed field (payload, metadata, type, version, timestamp, id,
+    /// sequence) or the stored digest itself was altered.
+    ModifiedEvent,
+    /// `prev_digest` links do not form an unbroken chain.
+    BrokenChain,
+    /// Event 1 does not link to the genesis value.
+    InvalidGenesis,
+    /// Missing, duplicated or reordered sequence numbers.
+    SequenceContinuity,
+    /// The stream head disagrees with the last event (e.g. a truncated tail).
+    HeadInconsistency,
+    /// The history disagrees with an externally trusted checkpoint.
+    CheckpointMismatch,
+    /// A row cannot be decoded at all.
+    MalformedRecord,
+}
+
+impl IntegrityIssue {
+    /// The issue's category.
+    #[must_use]
+    pub fn category(&self) -> IntegrityCategory {
+        match self {
+            Self::DigestMismatch { .. } => IntegrityCategory::ModifiedEvent,
+            Self::ChainBroken { .. } => IntegrityCategory::BrokenChain,
+            Self::InvalidGenesis { .. } => IntegrityCategory::InvalidGenesis,
+            Self::SequenceGap { .. } => IntegrityCategory::SequenceContinuity,
+            Self::MalformedRecord { .. } => IntegrityCategory::MalformedRecord,
+            Self::CheckpointMismatch { .. } => IntegrityCategory::CheckpointMismatch,
+            Self::HeadMismatch { .. } => IntegrityCategory::HeadInconsistency,
+        }
+    }
+
+    /// The (raw) sequence number the issue is attached to, if any.
+    #[must_use]
+    pub fn sequence(&self) -> Option<i64> {
+        let seq = |s: &Sequence| i64::try_from(s.get()).ok();
+        match self {
+            Self::DigestMismatch { sequence, .. }
+            | Self::ChainBroken { sequence, .. }
+            | Self::CheckpointMismatch { sequence, .. } => seq(sequence),
+            Self::InvalidGenesis { .. } => Some(1),
+            Self::SequenceGap { found, .. } => Some(*found),
+            Self::MalformedRecord { sequence, .. } => Some(*sequence),
+            Self::HeadMismatch {
+                recorded_sequence, ..
+            } => seq(recorded_sequence),
+        }
+    }
+}
+
+/// A trusted reference point in a stream's history: "event `sequence` had
+/// digest `digest`".
+///
+/// Unkeyed digests only prove that a history is *self-consistent*. A
+/// checkpoint stored somewhere the database writer cannot modify (another
+/// system, a signed log, printed in a release note) turns verification into
+/// "consistent **and** identical up to `sequence` to what was observed
+/// then". Obtain one with [`EventStore::checkpoint`](crate::EventStore::checkpoint),
+/// and check it with
+/// [`EventStore::verify_stream_against`](crate::EventStore::verify_stream_against).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct StreamCheckpoint {
+    /// Sequence of the checkpointed event (≥ 1).
+    pub sequence: Sequence,
+    /// Its digest.
+    pub digest: Digest,
+}
+
+/// An event referenced by an integrity issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AffectedEvent {
+    /// Sequence number.
+    pub sequence: Sequence,
+    /// Event id, when the row was decodable.
+    pub event_id: EventId,
 }
 
 /// Outcome of verifying one stream.
@@ -165,6 +264,8 @@ pub struct IntegrityReport {
     pub issues: Vec<IntegrityIssue>,
     /// Total defects found, including any beyond the cap.
     pub total_issues: u64,
+    /// Decodable events mentioned by `issues`, in sequence order.
+    pub affected_events: Vec<AffectedEvent>,
 }
 
 impl IntegrityReport {
@@ -172,6 +273,14 @@ impl IntegrityReport {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.total_issues == 0
+    }
+
+    /// Distinct categories of the reported issues, in a stable order.
+    #[must_use]
+    pub fn categories(&self) -> Vec<IntegrityCategory> {
+        let set: std::collections::BTreeSet<_> =
+            self.issues.iter().map(IntegrityIssue::category).collect();
+        set.into_iter().collect()
     }
 }
 
@@ -186,27 +295,51 @@ pub(crate) struct ChainVerifier {
     last_seen: StreamHead,
     issues: Vec<IntegrityIssue>,
     total_issues: u64,
+    affected: std::collections::BTreeMap<Sequence, EventId>,
+    /// Event ids seen so far, to resolve `affected` (bounded by the issue cap).
+    ids: Vec<(Sequence, EventId)>,
 }
 
 impl ChainVerifier {
     pub(crate) fn new(stream_id: StreamId, head: StreamHead) -> Self {
+        Self::starting_at(stream_id, head, StreamHead::EMPTY)
+    }
+
+    /// A verifier for the rows *after* `start`, whose digest is trusted.
+    pub(crate) fn starting_at(stream_id: StreamId, head: StreamHead, start: StreamHead) -> Self {
         Self {
             stream_id,
             head,
             events_checked: 0,
-            expected_sequence: Some(Sequence::FIRST),
-            prev_digest: Some(Digest::GENESIS),
-            last_seen: StreamHead::EMPTY,
+            expected_sequence: start.sequence.next(),
+            prev_digest: Some(start.digest),
+            last_seen: start,
             issues: Vec::new(),
             total_issues: 0,
+            affected: std::collections::BTreeMap::new(),
+            ids: Vec::new(),
         }
     }
 
     fn report(&mut self, issue: IntegrityIssue) {
         self.total_issues += 1;
         if self.issues.len() < MAX_REPORTED_ISSUES {
+            if let Some(sequence) = issue.sequence().and_then(Sequence::from_i64)
+                && let Some((_, id)) = self.ids.iter().rev().find(|(s, _)| *s == sequence)
+            {
+                self.affected.insert(sequence, *id);
+            }
             self.issues.push(issue);
         }
+    }
+
+    /// Adds a checkpoint finding (computed by the caller).
+    pub(crate) fn report_checkpoint(&mut self, issue: IntegrityIssue) {
+        self.report(issue);
+    }
+
+    pub(crate) fn last_seen(&self) -> StreamHead {
+        self.last_seen
     }
 
     pub(crate) fn push(&mut self, record: &RawEventRecord) {
@@ -234,6 +367,10 @@ impl ChainVerifier {
             }
         };
 
+        // Remember only the current id: issues are reported while handling
+        // this row, so that is all `report` needs to resolve.
+        self.ids.clear();
+        self.ids.push((event.sequence, event.event_id));
         let computed = record.digest_input(&event).compute();
         if computed != event.digest {
             self.report(IntegrityIssue::DigestMismatch {
@@ -242,7 +379,11 @@ impl ChainVerifier {
                 computed,
             });
         }
-        if let Some(expected_prev) = self.prev_digest
+        if event.sequence == Sequence::FIRST && event.prev_digest != Digest::GENESIS {
+            self.report(IntegrityIssue::InvalidGenesis {
+                stored_prev: event.prev_digest,
+            });
+        } else if let Some(expected_prev) = self.prev_digest
             && expected_prev != event.prev_digest
         {
             self.report(IntegrityIssue::ChainBroken {
@@ -270,12 +411,26 @@ impl ChainVerifier {
             };
             self.report(issue);
         }
+        self.into_report()
+    }
+
+    /// Finishes without comparing against the head (range verification).
+    pub(crate) fn finish_range(self) -> IntegrityReport {
+        self.into_report()
+    }
+
+    fn into_report(self) -> IntegrityReport {
         IntegrityReport {
             stream_id: self.stream_id,
             events_checked: self.events_checked,
             head: self.head,
             issues: self.issues,
             total_issues: self.total_issues,
+            affected_events: self
+                .affected
+                .into_iter()
+                .map(|(sequence, event_id)| AffectedEvent { sequence, event_id })
+                .collect(),
         }
     }
 }

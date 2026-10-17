@@ -6,6 +6,36 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Phase 3: crash lab
+
+- Fault injection: `fault::FaultPoint` at every write-path boundary, and a
+  per-store hook (`EventStore::set_fault_hook`) behind the off-by-default
+  `fault-injection` feature.
+- Recovery tests with real child-process crashes (`abort()` inside
+  transactions, `SIGKILL` during appends), and fault-injection tests for
+  every point.
+- Concurrency stress tests: a mixed multi-connection workload, and optimistic
+  writers in separate processes, with invariant checks.
+- `EventStore::verify_store` (SQLite integrity and foreign-key checks,
+  protective triggers, streams, snapshots, replay runs), `list_streams`,
+  `checkpoint` and `verify_stream_against` (trusted checkpoints).
+- `IntegrityCategory`, `IntegrityIssue::{InvalidGenesis, CheckpointMismatch}`,
+  `IntegrityReport::affected_events`, and `StoreError::class()` / `ErrorClass`.
+- Schema migration 3: `replay_runs` and `replay_executions`.
+- `replay::ReplayLab`: record, execute, re-execute, inspect, and `experiment`.
+  `ReplayOutcome` covers exact match, reconverged, diverged (with the first
+  divergence point and final diff), projection failed, unavailable, invalid
+  input and integrity failure.
+- A `crash_lab` benchmark suite, the `crash_lab` example, `RECOVERY.md`,
+  `REPLAY.md`, and ADRs 0006 and 0007.
+
+### Changed
+
+- Schema version 3. Version 1 and 2 databases are upgraded in place, and
+  tests cover both from real fixtures.
+- `IntegrityReport` gained `affected_events`. Event 1 with a non-genesis
+  `prev_digest` is now reported as `InvalidGenesis` rather than `ChainBroken`.
+
 ### Added — Phase 2: historical state reconstruction and snapshots
 
 - `Projection` trait with typed `ProjectionError`s, `decode_payload`, and the

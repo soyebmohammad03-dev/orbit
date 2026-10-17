@@ -15,7 +15,7 @@ Each `EventStore` opens one SQLite connection with the following settings:
 | `foreign_keys`       | `ON`                                       | Enforces `events.stream_id → streams`. |
 | `busy_timeout`       | 5 s (configurable, max 600 s)              | How long to wait for another connection's lock before returning `StoreError::Busy`. |
 | `application_id`     | `0x4F524254` ("ORBT")                      | Marks ORBIT files. Foreign files are refused. |
-| `user_version`       | schema version (currently `2`)             | Migration bookkeeping. |
+| `user_version`       | schema version (currently `3`)             | Migration bookkeeping. |
 
 SQLite is compiled from source (`rusqlite` `bundled` feature), so every
 platform uses the same SQLite version, with JSON functions and `STRICT` tables.
@@ -62,6 +62,19 @@ still cannot be.
 `tests/fixtures/schema_v1.sql` is a dump of a database written by the
 Phase 1 code. `tests/schema.rs` loads it and checks that opening it upgrades
 the file in place to v2, with events intact and verifiable.
+
+### Schema version 3: replay runs
+
+Migration 3 adds `replay_runs` and `replay_executions`. Both are immutable,
+enforced by the triggers `replay_runs_no_update` and
+`replay_executions_no_update`. Executions are deleted with their run. There
+are indexes on `(stream_id, created_at)` and `(run_id, executed_at)`. CHECK
+constraints tie the trace length to the interval (`32 × (to − from)` bytes)
+and the start source to its snapshot reference. The data model is in
+[REPLAY.md](REPLAY.md). `tests/fixtures/schema_v2.sql` is a dump of a database
+written by the Phase 2 code, with events and a snapshot. `tests/schema.rs`
+checks that it upgrades in place to v3 and still verifies, reconstructs (using
+its snapshot) and replays.
 
 ### Indexes
 
@@ -171,9 +184,17 @@ nothing beyond them:
 - Neither mode protects against media failure, file deletion, or copying the
   file while a writer is active. Back up with SQLite's backup API or
   `VACUUM INTO`, not with `cp`.
-- Crash recovery testing (killing processes mid-commit, fault injection) is
-  planned for Phase 3. Phase 1 relies on SQLite's guarantees and does not
-  independently verify them.
+- Process-crash recovery is tested with real child processes, both
+  `abort()` inside transactions and `SIGKILL` during appends (Phase 3, see
+  [RECOVERY.md](RECOVERY.md)). OS crashes and power loss are not simulated.
+  Under those, ORBIT relies on SQLite's guarantees and does not independently
+  verify them.
+
+## Recovery and fault injection
+
+The atomicity of each operation, fault-injection points, process-crash tests,
+the recovery procedure (`verify_store`) and error classes are in
+[RECOVERY.md](RECOVERY.md).
 
 ## Integrity verification
 
@@ -239,13 +260,23 @@ Only verification does.
 - Deletion or reordering of events inside a stream.
 - Truncation of a stream's tail, provided the stream row's head was not also rewritten.
 
+`EventStore::verify_store` extends this to the whole file: SQLite's
+`integrity_check` and `foreign_key_check`, the presence of every protective
+trigger, all streams, all snapshots (digest and history binding) and all
+replay-run record digests. Since Phase 3, issues carry an `IntegrityCategory`
+and the affected event ids. Event 1 linking to anything but genesis is its own
+category (`InvalidGenesis`). `verify_stream_against` checks trusted
+checkpoints (see [RECOVERY.md](RECOVERY.md#checkpoints-as-a-trust-anchor)).
+
 ### What it cannot guarantee
 
 - **The digests are unkeyed.** Anyone who can write the database file can
   change events, recompute every digest, and update the head. The result
   verifies as valid. `tests/integrity.rs::consistent_rewrite_with_recomputed_digests_is_not_detected`
-  demonstrates this. Detecting that needs a secret key (an HMAC) or digests
-  anchored outside the database. Neither exists yet.
+  demonstrates this. Since Phase 3, **checkpoints** kept outside the database
+  detect such a rewrite up to the checkpoint
+  (`tests/integrity_diagnostics.rs::checkpoints_detect_a_consistently_recomputed_rewrite`).
+  Keys or signatures are not implemented.
 - Stream rows are not hashed. `created_at` and stream `metadata` are protected
   only by triggers. Deleting an entire stream (stream row and all its events)
   is not detected by per-stream verification.

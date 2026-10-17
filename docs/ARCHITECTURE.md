@@ -1,9 +1,10 @@
 # Architecture
 
-Phases 1 and 2 deliver one library crate, `orbit-core`, inside a Cargo
-workspace (see [ADR 0003](adr/0003-single-crate-concrete-store.md)). Phase 1
-is the event store. Phase 2 adds projections, historical reconstruction,
-snapshots and state diffs on top of it.
+Phases 1–3 deliver one library crate, `orbit-core`, inside a Cargo workspace
+(see [ADR 0003](adr/0003-single-crate-concrete-store.md)). Phase 1 is the
+event store. Phase 2 adds projections, historical reconstruction, snapshots
+and state diffs on top of it. Phase 3 adds fault injection, store-wide
+verification with checkpoints, and deterministic replay.
 
 ## Components
 
@@ -54,6 +55,10 @@ flowchart TB
 | `projection`| The `Projection` trait, `ProjectionError`, `decode_payload`, and the `Counter` / `Inventory` examples. | no |
 | `reconstruct` | `Reconstructor<P>`: target resolution, snapshot selection and validation, the bounded fold, equivalence checks, `diff` and `explain`, and reports. | no (uses `EventStore` only) |
 | `diff`      | A structural JSON diff with RFC 6901 paths. | no |
+| `replay`    | `ReplayLab<P>`: replay-run records, re-execution against the trace, `ReplayOutcome` classification, experiments. | no (uses `EventStore` only) |
+| `fault`     | `FaultPoint`s. With the `fault-injection` feature, a per-store hook (`EventStore::set_fault_hook`). | no |
+| `store::verify` | `verify_store`, `checkpoint`, `verify_stream_against`, `list_streams`, and range verification for replay. | yes |
+| `store::replay` | Replay-run and execution persistence. | yes |
 | `config`    | `StoreConfig`, `Durability`, `Limits`, `ORBIT_*` environment variables. | no |
 | `error`     | Typed errors. The driver error is wrapped opaquely (`DatabaseError`). | wraps it |
 
@@ -114,6 +119,29 @@ sequenceDiagram
 Reconstruction holds no transaction across the fold. See
 [RECONSTRUCTION.md](RECONSTRUCTION.md) and [SNAPSHOTS.md](SNAPSHOTS.md).
 
+## Replay data flow
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant L as ReplayLab<P>
+    participant S as EventStore
+
+    C->>L: record(stream, start, to)
+    L->>S: verify_range(start, to) (refuse damaged history)
+    L->>L: fold, recording state digest after each event
+    L->>S: insert replay_runs row (record digest)
+    C->>L: execute(run_id)
+    L->>S: load run, check record digest
+    L->>L: same ProjectionKey? (never substitute)
+    L->>S: boundary digests + verify_range
+    L->>L: re-fold, compare each state digest with the trace
+    L->>S: insert replay_executions row
+    L-->>C: ReplayExecution { outcome, first_divergence, ... }
+```
+
+See [REPLAY.md](REPLAY.md) and [RECOVERY.md](RECOVERY.md).
+
 ## Key decisions
 
 | Decision | Record |
@@ -123,6 +151,8 @@ Reconstruction holds no transaction across the fold. See
 | One crate and a concrete store, no storage trait yet | [ADR 0003](adr/0003-single-crate-concrete-store.md) |
 | Sequence allocation under `BEGIN IMMEDIATE` | [ADR 0004](adr/0004-sequence-allocation.md) |
 | Snapshots bound to an event digest, with no long transactions during reconstruction | [ADR 0005](adr/0005-snapshot-binding-and-boundary.md) |
+| Feature-gated fault hooks and child-process crash tests | [ADR 0006](adr/0006-fault-injection-and-crash-testing.md) |
+| Self-contained replay runs with a per-event state-digest trace | [ADR 0007](adr/0007-replay-run-records.md) |
 
 Smaller choices:
 
@@ -143,12 +173,10 @@ Smaller choices:
 
 ## Extension points for later phases
 
-- **Phase 3 (recovery, concurrency, replay).** Deterministic replay and
-  divergence diagnostics can build on `compare_with_full_replay` and `explain`.
-  `ChainVerifier` already separates "invalid data" from "could not verify".
-  Crash testing will exercise `Durability`. Read connection pooling can go
-  behind the existing API.
-- **Phase 4 (API).** Domain types, reconstruction reports, diffs, snapshot
-  statuses and errors' detail structs already derive `Serialize`, and
-  requests have validating `Deserialize`. The Axum layer will call the store
-  through `spawn_blocking`.
+- **Phase 4 (API).** Every report is `Serialize`, and requests have
+  validating `Deserialize`. This includes reconstruction reports, diffs,
+  snapshot statuses, integrity reports, store reports, replay executions and
+  experiment reports. Error detail structs and `ErrorClass` map directly to
+  HTTP statuses. The Axum layer will call the store through `spawn_blocking`.
+- **Phase 5 (hardening).** Benchmarks exist for every subsystem. OS-crash and
+  power-loss testing would need a VM-level harness, and is out of scope so far.

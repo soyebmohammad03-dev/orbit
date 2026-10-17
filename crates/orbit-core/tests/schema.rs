@@ -17,7 +17,7 @@ fn fresh_database_is_marked_and_versioned() {
     let app_id: i64 = raw
         .query_row("PRAGMA application_id", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     assert_eq!(app_id, 0x4F52_4254);
     let tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
@@ -26,7 +26,16 @@ fn fresh_database_is_marked_and_versioned() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(tables, vec!["events", "snapshots", "streams"]);
+    assert_eq!(
+        tables,
+        vec![
+            "events",
+            "replay_executions",
+            "replay_runs",
+            "snapshots",
+            "streams"
+        ]
+    );
 }
 
 #[test]
@@ -71,7 +80,7 @@ fn newer_schema_version_is_refused() {
             err,
             StoreError::UnsupportedSchemaVersion {
                 found: 99,
-                supported: 2
+                supported: 3
             }
         ),
         "{err}"
@@ -116,7 +125,8 @@ fn version_1_database_is_migrated_to_version_2() {
         .raw()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    // Migrations 2 and 3 are both applied in order.
+    assert_eq!(version, 3);
 
     let id = sid("counter-1");
     assert_eq!(store.read_stream(&id).unwrap().len(), 3);
@@ -132,4 +142,48 @@ fn version_1_database_is_migrated_to_version_2() {
         serde_json::json!({"value": 6})
     );
     assert_eq!(store.list_snapshots(&id).unwrap().len(), 1);
+}
+
+/// A database written by Phase 2 (schema v2, see `tests/fixtures/schema_v2.sql`,
+/// with events and a snapshot) is upgraded to v3 with everything intact.
+#[test]
+fn version_2_database_is_migrated_to_version_3() {
+    use orbit_core::projection::examples::CounterState;
+    use orbit_core::reconstruct::StartPoint;
+    use orbit_core::replay::{ReplayLab, ReplayOutcome, ReplayStart};
+
+    let db = TestDb::new();
+    db.raw()
+        .execute_batch(include_str!("fixtures/schema_v2.sql"))
+        .unwrap();
+    let store = db.open();
+    let version: i64 = db
+        .raw()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+
+    let report = store.verify_store().unwrap();
+    assert!(report.is_valid(), "{report:?}");
+    assert_eq!(report.snapshots_checked, 1);
+
+    let id = sid("counter-1");
+    let counter = Reconstructor::new(&store, Counter);
+    let latest = counter
+        .reconstruct(&id, Target::Latest, ReconstructOptions::default())
+        .unwrap();
+    assert_eq!(latest.state, CounterState { value: 16 });
+    // The Phase 2 snapshot at sequence 3 is still valid and used.
+    assert!(
+        matches!(latest.report.start, StartPoint::Snapshot { sequence, .. } if sequence.get() == 3)
+    );
+
+    let lab = ReplayLab::new(&store, Counter);
+    let run = lab
+        .record(&id, ReplayStart::Initial, Target::Latest)
+        .unwrap();
+    assert_eq!(
+        lab.execute(run.id).unwrap().outcome,
+        ReplayOutcome::ExactMatch
+    );
 }

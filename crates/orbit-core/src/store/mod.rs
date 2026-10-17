@@ -23,10 +23,13 @@
 //! the write lock is held from step 2, no other writer can observe or change
 //! the head between reading and advancing it.
 
+mod replay;
 mod schema;
 mod snapshots;
+mod verify;
 
 pub use snapshots::{NewSnapshot, SavedSnapshot};
+pub use verify::{ReplayRecordIssue, SnapshotIntegrityIssue, StoreIntegrityReport};
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -39,6 +42,7 @@ use crate::domain::{
     StreamHead, StreamId, Timestamp,
 };
 use crate::error::{Result, StoreError, ValidationError};
+use crate::fault::FaultPoint;
 use crate::integrity::{ChainVerifier, EventDigestInput, IntegrityReport};
 use crate::record::RawEventRecord;
 
@@ -49,10 +53,19 @@ const EVENT_COLUMNS: &str = "stream_id, sequence, event_id, event_type, schema_v
                              recorded_at, payload, metadata, prev_digest, digest";
 
 /// Persistent, append-only event store backed by a SQLite file.
-#[derive(Debug)]
 pub struct EventStore {
     conn: Mutex<Connection>,
     config: StoreConfig,
+    #[cfg(feature = "fault-injection")]
+    fault_hook: Mutex<Option<crate::fault::FaultHook>>,
+}
+
+impl std::fmt::Debug for EventStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventStore")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EventStore {
@@ -69,7 +82,41 @@ impl EventStore {
         Ok(Self {
             conn: Mutex::new(conn),
             config,
+            #[cfg(feature = "fault-injection")]
+            fault_hook: Mutex::new(None),
         })
+    }
+
+    /// Installs (or with `None` removes) this store's fault hook. See [`crate::fault`].
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fault_hook(&self, hook: Option<crate::fault::FaultHook>) {
+        *self
+            .fault_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    /// Consults the fault hook at `point`.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn fault(&self, point: FaultPoint) -> Result<()> {
+        let hook = self
+            .fault_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if hook.is_some_and(|hook| hook(point)) {
+            tracing::debug!(%point, "injected fault");
+            return Err(StoreError::InjectedFault(point));
+        }
+        Ok(())
+    }
+
+    /// Fault points compile to nothing without the `fault-injection` feature.
+    #[cfg(not(feature = "fault-injection"))]
+    #[inline(always)]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn fault(&self, _point: FaultPoint) -> Result<()> {
+        Ok(())
     }
 
     /// The configuration this store was opened with.
@@ -117,6 +164,7 @@ impl EventStore {
         if inserted == 0 {
             return Err(StoreError::StreamAlreadyExists(id.clone()));
         }
+        self.fault(FaultPoint::CreateStreamBeforeCommit)?;
         tx.commit()?;
         tracing::debug!(stream = %id, "created stream");
 
@@ -187,8 +235,10 @@ impl EventStore {
         let event_id = request.event_id.unwrap_or_else(EventId::generate);
         let recorded_at = Timestamp::now()?;
 
+        self.fault(FaultPoint::AppendBeforeBegin)?;
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.fault(FaultPoint::AppendAfterBegin)?;
 
         let head =
             load_head(&tx, stream)?.ok_or_else(|| StoreError::StreamNotFound(stream.clone()))?;
@@ -231,6 +281,7 @@ impl EventStore {
             prev_digest: head.digest,
         }
         .compute();
+        self.fault(FaultPoint::AppendAfterSequenceAllocated)?;
 
         tx.execute(
             "INSERT INTO events (stream_id, sequence, event_id, event_type, schema_version,
@@ -249,6 +300,7 @@ impl EventStore {
                 digest.as_bytes().as_slice(),
             ],
         )?;
+        self.fault(FaultPoint::AppendAfterInsert)?;
         let advanced = tx.execute(
             "UPDATE streams SET head_sequence = ?1, head_digest = ?2
              WHERE stream_id = ?3 AND head_sequence = ?4",
@@ -267,6 +319,7 @@ impl EventStore {
                 actual: load_head(&tx, stream)?.map_or(head.sequence, |h| h.sequence),
             });
         }
+        self.fault(FaultPoint::AppendBeforeCommit)?;
         tx.commit()?;
         tracing::trace!(stream = %stream, %sequence, "appended event");
 
@@ -373,24 +426,7 @@ impl EventStore {
         let head =
             load_head(&tx, stream)?.ok_or_else(|| StoreError::StreamNotFound(stream.clone()))?;
         let mut verifier = ChainVerifier::new(stream.clone(), head);
-        let mut after = Sequence::ZERO;
-        loop {
-            let page = select_after(&tx, stream, after, Some(VERIFY_PAGE_SIZE))?;
-            for raw in &page {
-                verifier.push(raw);
-            }
-            match page.last() {
-                Some(last) if page.len() == VERIFY_PAGE_SIZE => {
-                    // Stored sequences are >= 1 (CHECK constraint); a negative
-                    // value would already have been reported as malformed.
-                    match Sequence::from_i64(last.sequence) {
-                        Some(next_after) if next_after > after => after = next_after,
-                        _ => break,
-                    }
-                }
-                _ => break,
-            }
-        }
+        feed_verifier(&tx, stream, &mut verifier, Sequence::ZERO, None)?;
         let report = verifier.finish();
         if report.is_valid() {
             tracing::debug!(stream = %stream, events = report.events_checked, "stream verified");
@@ -398,6 +434,40 @@ impl EventStore {
             tracing::warn!(stream = %stream, issues = report.total_issues, "integrity issues found");
         }
         Ok(report)
+    }
+}
+
+/// Feeds the rows with `after < sequence <= through` (no upper bound if
+/// `None`) to `verifier`, in pages.
+fn feed_verifier(
+    conn: &Connection,
+    stream: &StreamId,
+    verifier: &mut ChainVerifier,
+    mut after: Sequence,
+    through: Option<Sequence>,
+) -> Result<()> {
+    loop {
+        let limit = match through {
+            Some(through) if through <= after => return Ok(()),
+            Some(through) => usize::try_from(through.get() - after.get())
+                .map_or(VERIFY_PAGE_SIZE, |n| n.min(VERIFY_PAGE_SIZE)),
+            None => VERIFY_PAGE_SIZE,
+        };
+        let page = select_after(conn, stream, after, Some(limit))?;
+        for raw in &page {
+            verifier.push(raw);
+        }
+        match page.last() {
+            Some(last) if page.len() == limit => {
+                // Stored sequences are >= 1 (CHECK constraint); a negative
+                // value would already have been reported as malformed.
+                match Sequence::from_i64(last.sequence) {
+                    Some(next_after) if next_after > after => after = next_after,
+                    _ => return Ok(()),
+                }
+            }
+            _ => return Ok(()),
+        }
     }
 }
 

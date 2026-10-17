@@ -104,6 +104,14 @@ pub enum ValidationError {
         /// Maximum in bytes.
         max: usize,
     },
+    /// A replay interval longer than [`MAX_REPLAY_EVENTS`](crate::replay::MAX_REPLAY_EVENTS).
+    #[error("replay interval of {actual} events exceeds the maximum of {max}")]
+    ReplayIntervalTooLarge {
+        /// Requested number of events.
+        actual: u64,
+        /// Maximum.
+        max: u64,
+    },
     /// A read limit of zero was requested.
     #[error("read limit must be at least 1")]
     ZeroLimit,
@@ -202,6 +210,21 @@ pub enum StoreError {
         /// Description of the defect.
         reason: String,
     },
+    /// A fault was injected at this point by a test hook (only with the
+    /// `fault-injection` feature). The operation was not applied.
+    #[error("injected fault at {0}")]
+    InjectedFault(crate::fault::FaultPoint),
+    /// No replay run with this identifier exists.
+    #[error("replay run {0} does not exist")]
+    ReplayRunNotFound(crate::replay::ReplayRunId),
+    /// A persisted replay row could not be decoded.
+    #[error("corrupt replay record {record}: {reason}")]
+    CorruptReplayRecord {
+        /// Run or execution id as stored.
+        record: String,
+        /// Description of the defect.
+        reason: String,
+    },
     /// The database file exists but was not created by ORBIT.
     #[error("not an ORBIT database: {0}")]
     NotAnOrbitDatabase(String),
@@ -218,6 +241,62 @@ pub enum StoreError {
     /// An unexpected database failure.
     #[error("database error: {0}")]
     Database(#[from] DatabaseError),
+}
+
+/// Coarse classification of a [`StoreError`], for deciding how to react.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    /// Transient; retrying the same operation may succeed (`Busy`, injected faults).
+    Retryable,
+    /// Optimistic-concurrency or uniqueness conflict; re-read and decide.
+    Conflict,
+    /// The request itself is invalid; retrying it unchanged will fail again.
+    InvalidRequest,
+    /// The referenced stream, event, snapshot or run does not exist.
+    NotFound,
+    /// Stored data is damaged or inconsistent. Do not retry; run
+    /// [`EventStore::verify_store`](crate::EventStore::verify_store).
+    Integrity,
+    /// The file is not usable by this build (foreign file, newer schema).
+    Incompatible,
+    /// Unexpected database failure (I/O, disk full, …).
+    Database,
+}
+
+impl StoreError {
+    /// Classifies the error.
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Busy | Self::InjectedFault(_) => ErrorClass::Retryable,
+            Self::SequenceConflict { .. }
+            | Self::DuplicateEventId(_)
+            | Self::StreamAlreadyExists(_)
+            | Self::SnapshotConflict(_) => ErrorClass::Conflict,
+            Self::Validation(_) | Self::Config(_) | Self::SequenceExhausted(_) => {
+                ErrorClass::InvalidRequest
+            }
+            Self::StreamNotFound(_)
+            | Self::EventNotFound { .. }
+            | Self::SnapshotNotFound(_)
+            | Self::ReplayRunNotFound(_) => ErrorClass::NotFound,
+            Self::CorruptRecord { .. }
+            | Self::CorruptSnapshot { .. }
+            | Self::CorruptReplayRecord { .. }
+            | Self::SnapshotHistoryMismatch { .. } => ErrorClass::Integrity,
+            Self::NotAnOrbitDatabase(_) | Self::UnsupportedSchemaVersion { .. } => {
+                ErrorClass::Incompatible
+            }
+            Self::Database(_) => ErrorClass::Database,
+        }
+    }
+
+    /// `true` if retrying the same operation may succeed.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.class() == ErrorClass::Retryable
+    }
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -252,3 +331,63 @@ pub struct SnapshotConflict {
 
 /// Convenience alias for results of store operations.
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::StreamId;
+
+    #[test]
+    fn classification() {
+        let id = StreamId::new("s").unwrap();
+        assert_eq!(StoreError::Busy.class(), ErrorClass::Retryable);
+        assert!(StoreError::Busy.is_retryable());
+        assert_eq!(
+            StoreError::SequenceConflict {
+                stream: id.clone(),
+                expected: Sequence::ZERO,
+                actual: Sequence::FIRST
+            }
+            .class(),
+            ErrorClass::Conflict
+        );
+        assert_eq!(
+            StoreError::StreamNotFound(id.clone()).class(),
+            ErrorClass::NotFound
+        );
+        assert_eq!(
+            StoreError::CorruptRecord {
+                stream: "s".into(),
+                sequence: 1,
+                reason: String::new()
+            }
+            .class(),
+            ErrorClass::Integrity
+        );
+        assert!(
+            !StoreError::CorruptRecord {
+                stream: "s".into(),
+                sequence: 1,
+                reason: String::new()
+            }
+            .is_retryable()
+        );
+        assert_eq!(
+            StoreError::Validation(ValidationError::ZeroLimit).class(),
+            ErrorClass::InvalidRequest
+        );
+        assert_eq!(
+            StoreError::UnsupportedSchemaVersion {
+                found: 9,
+                supported: 3
+            }
+            .class(),
+            ErrorClass::Incompatible
+        );
+        let busy = StoreError::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ));
+        assert!(busy.is_retryable());
+    }
+}

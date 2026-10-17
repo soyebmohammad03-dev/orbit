@@ -20,6 +20,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps --open        # API docs
 cargo run -p orbit-core --example quickstart  # end-to-end example (event store)
 cargo run -p orbit-core --example time_travel # reconstruction, snapshots, diff
+cargo run -p orbit-core --example crash_lab   # verification, checkpoints, replay, divergence
 ```
 
 CI (`.github/workflows/ci.yml`) runs `fmt --check`, `check`, `clippy`, `test`,
@@ -40,9 +41,20 @@ CI (`.github/workflows/ci.yml`) runs `fmt --check`, `check`, `clippy`, `test`,
 | `tests/reconstruction.rs`   | Empty streams, latest and historical targets, sequence 0, beyond-head targets, ordering, projection failures with context, no partial results, multi-page folds, broken-history detection |
 | `tests/snapshots.rs`        | Creation, retrieval, listing, reopen, idempotence and conflicts, history binding, every validation outcome, irregular intervals, never-after-target, `Exact` / `Prefer` / `Strict`, corrupt-snapshot fallback, incompatible versions, full-replay equivalence, appends during snapshot creation (with a concurrent writer) |
 | `tests/state_diff.rs`       | Diffs between historical positions, additions and removals, nested fields, arrays, reversed diffs, identical states, empty or invalid histories, projection errors in the interval, `explain` attribution |
+| `tests/fault_injection.rs`  | Every fault point: no committed state after a failure, the connection keeps working, the store verifies, reopen preserves committed data; snapshot and replay persistence faults; intermittent fault schedules |
+| `tests/crash_recovery.rs`   | Child processes that `abort()` inside appends and snapshot saves, or are `SIGKILL`ed while appending; recovery on reopen |
+| `tests/stress.rs`           | Mixed multi-connection workload (blind writers, optimistic writers with retry, readers, snapshotter) and optimistic writers in separate processes, with invariant checks |
+| `tests/integrity_diagnostics.rs` | Categories and affected event ids, invalid genesis, swapped events, inconsistent empty head, checkpoints versus a recomputed rewrite and versus truncation, `verify_store` over damaged events, snapshots, runs and triggers, foreign-key violations |
+| `tests/replay.rs`           | Recording, persistence and reopen, determinism, snapshot and reconstructed starts, refusal of damaged inputs, and every outcome: exact, reconverged, diverged (first event localised), projection failure, version mismatch, invalid input, altered expectation, damaged history and boundary, truncated history, corrupt start snapshot (warning), experiments |
+| `tests/replay_properties.rs` | Proptest: replay is exact and deterministic; with a drifting projection, the first divergence is exactly the first affected event; random fault schedules never commit failed appends |
 | `tests/reconstruction_properties.rs` | Proptest: snapshot-assisted equals full replay equals reference fold (counter and inventory, varied snapshot intervals and targets), the newest eligible snapshot is selected, deterministic diffs |
 
 Every integration test uses a real SQLite file in its own temporary directory.
+The test suite builds `orbit-core` with the `fault-injection` feature, through
+a self dev-dependency in `crates/orbit-core/Cargo.toml`. Library builds do not
+include it. `crash_recovery.rs` and `stress.rs` re-invoke their own test
+binary as child processes, through the `crash_child_entrypoint` and
+`stress_child_entrypoint` tests. Those return immediately in a normal run.
 No test sleeps for correctness. The `Busy` test uses a bounded 50 ms busy
 timeout against a lock held explicitly by the test.
 
@@ -162,6 +174,71 @@ What these numbers show:
   3.16 ms here is reconstructing the base (900 events from the snapshot at
   1,000) plus 100 serialize-and-diff steps on a 50-SKU state.
 
+## Phase 3 benchmarks
+
+```bash
+cargo bench -p orbit-core --bench crash_lab
+cargo bench -p orbit-core --bench crash_lab -- replay/   # filter
+```
+
+Each group uses its own database (`Durability::Normal`), built outside the
+measured code.
+
+| Benchmark | Dataset | Measures |
+|-----------|---------|----------|
+| `concurrency/4_connections_x_100_appends` | fresh DB per iteration (setup unmeasured) | 4 threads, each with its own connection, appending 100 events to one stream |
+| `concurrency/1_connection_x_400_appends` | same | the same 400 appends from one connection |
+| `optimistic/append_expected_head_success` | 100 events, growing | `append` with `Exact(head)` that succeeds |
+| `optimistic/append_stale_head_conflict` | 100 events | `append` with a stale `Exact` that is rejected |
+| `failure/append_committed` | 100 events, growing; hook installed, never fires | baseline append |
+| `failure/append_rolled_back_before_commit` | 100 events; hook fails at `AppendBeforeCommit` | the full append work plus a rollback |
+| `verify/verify_stream_10k` | 10,000 events + 10 snapshots | `verify_stream` |
+| `verify/verify_store_10k_events_10_snapshots` | same | `verify_store` (includes `PRAGMA integrity_check`) |
+| `replay/record_1k_from_initial` | 1,000 events | `ReplayLab::record` (verify interval + fold + trace + insert) |
+| `replay/execute_1k_from_initial` | same | `execute`: exact match, persisted |
+| `replay/execute_100_from_snapshot_at_900` | same + snapshot at 900 | `execute` of a run starting from the snapshot |
+
+### Recorded measurement (Phase 3)
+
+These are from one run on 2026-10-18: Apple M3, 8 GB RAM, macOS 27.0.1,
+rustc 1.99.1, release profile, built with the `fault-injection` feature (as
+all benchmarks are, through the dev-dependency). Medians:
+
+| Benchmark | Median |
+|-----------|--------|
+| `concurrency/4_connections_x_100_appends` | 48.8 ms |
+| `concurrency/1_connection_x_400_appends` | 32.3 ms |
+| `optimistic/append_expected_head_success` | 73.0 µs |
+| `optimistic/append_stale_head_conflict` | 7.33 µs |
+| `failure/append_committed` | 71.3 µs |
+| `failure/append_rolled_back_before_commit` | 38.7 µs |
+| `verify/verify_stream_10k` | 11.4 ms |
+| `verify/verify_store_10k_events_10_snapshots` | 28.1 ms |
+| `replay/record_1k_from_initial` | 2.78 ms |
+| `replay/execute_1k_from_initial` | 2.68 ms |
+| `replay/execute_100_from_snapshot_at_900` | 397 µs |
+
+What these numbers show:
+
+- **More writer connections do not add write throughput.** SQLite allows one
+  writer per file, so four competing connections were about 50% *slower* than
+  one doing the same 400 appends. The extra time goes to lock hand-offs and
+  busy waits. Concurrency here buys safety, not speed.
+- A rejected optimistic append costs about a tenth of a successful one. The
+  conflict is detected right after the head read, before any write.
+- A failure just before commit costs less than a commit: the work is done,
+  but there is no WAL commit or sync.
+- `verify_store` costs about 2.5× `verify_stream` on this dataset. The
+  difference is SQLite's full `integrity_check` plus snapshot validation.
+- Replay costs about 2.7 µs per event, against about 0.6 µs per event for plain
+  reconstruction (Phase 2 table). The difference is the interval verification
+  plus serializing and hashing the state after every event, which the trace
+  requires. Starting from a snapshot near the end reduces it proportionally.
+- `failure/append_committed` (71 µs) is higher than Phase 1's `append/normal`
+  (45 µs). These come from different benchmark binaries and runs, with
+  different stream sizes and payloads, so the two numbers are not comparable.
+  The cause has not been isolated.
+
 ## Changing things safely
 
 - **Domain types.** Keep validation in the constructor and route serde
@@ -184,6 +261,12 @@ What these numbers show:
 - **Digest construction.** Do not change it in place. Introduce a new domain
   tag and a versioned upgrade path. The golden-vector test will fail if you
   change it by accident.
+- **Write paths.** Keep `self.fault(FaultPoint::…)?` calls at the documented
+  boundaries, and add a point (plus a `tests/fault_injection.rs` case) for
+  any new transaction.
+- **Replay.** Changing the state digest, the run digest or the trace format
+  needs a new domain tag. Existing runs would otherwise be reported as
+  integrity failures.
 - **New dependencies.** Prefer the existing stack. Record significant
   additions in an ADR.
 
