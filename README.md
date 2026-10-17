@@ -5,13 +5,17 @@ debugging platform.** It records what happened to a system as ordered,
 append-only, integrity-checked event streams. From those streams it
 reconstructs, compares and deterministically replays historical state.
 
-> **Status: Phases 1–4 of 5 are complete.** Phase 1 is the core event engine
-> and persistence. Phase 2 is historical state reconstruction, snapshots and
-> state diffs. Phase 3 is crash recovery, concurrency guarantees, integrity
-> diagnostics and deterministic replay. Phase 4 is the **Observatory**: a local
-> HTTP API and a web interface over the real engine. Phase 5 (release
-> hardening) is planned. ORBIT is pre-release, the API may change, and it is not
-> production-ready.
+> **Status: all five planned phases are complete. The current release is
+> `v0.1.0`, a pre-1.0 release** (see [Release status](#release-status)).
+> - Phase 1: core event engine and persistence.
+> - Phase 2: historical state reconstruction, snapshots and state diffs.
+> - Phase 3: crash recovery, concurrency guarantees, integrity diagnostics and
+>   deterministic replay.
+> - Phase 4: the **Observatory**, a local HTTP API and web interface over the
+>   real engine.
+> - Phase 5: verification, hardening and release.
+>
+> The HTTP API is for **trusted local use only**: it has no authentication.
 
 ![ORBIT Observatory: Time Travel](docs/screenshots/time-travel.png)
 
@@ -131,7 +135,7 @@ state, diffs two of them, and names the events responsible for each change.
 | Suite | Count | Runs against |
 |-------|-------|--------------|
 | `orbit-core` unit + integration + doc | 44 + 126 + 4 | real SQLite files (126 includes 9 property tests and 2 child-process entry points) |
-| `orbit-api` unit + HTTP contract + TCP | 5 + 16 + 1 | the real router and engine on temporary databases |
+| `orbit-api` unit + HTTP contract + hardening + TCP | 7 + 16 + 6 + 1 | the real router and engine on temporary databases |
 | Web unit and component (Vitest) | 21 | the API client, components and the Overview page, with mocked responses |
 | End-to-end (Playwright) | 2 | a real `orbit-api` + production web build + an empty temporary SQLite file |
 
@@ -346,9 +350,48 @@ their hardware and conditions.
 | 2 | Historical state reconstruction, snapshots and state diffs | **done** |
 | 3 | Crash recovery, concurrency control, integrity auditing, deterministic replay and divergence diagnostics | **done** |
 | 4 | Backend API (Axum) and web observability frontend | **done** |
-| 5 | Test hardening, reproducible benchmarks, documentation, release | planned |
+| 5 | Verification, hardening, documentation, release | **done** (`v0.1.0`) |
 
-Phase 5 is planned work and does not exist yet. That includes release packaging and versioned artifacts.
+## Release status
+
+`v0.1.0` is a **pre-1.0 release**. It is verified from a clean checkout of the
+public repository, and every check listed above passes there and in CI. It is
+deliberately not `1.0.0`, because a 1.0 would promise stability that ORBIT does
+not yet have:
+
+- **The Rust library API is not stable.** It grew in every phase, and the
+  error enums are not `#[non_exhaustive]`, so adding a variant is a breaking
+  change.
+- **The HTTP API `v1` is new.** It has no deprecation policy, and engine reports
+  are typed only as `object` in OpenAPI.
+- **It is local-only by design.** There is no authentication, and a single
+  SQLite connection serves all requests.
+- **Durability under OS crashes and power loss is not independently tested.**
+  It relies on SQLite and the device.
+- **Platform coverage is narrow.** It has been tested on one macOS development
+  machine plus GitHub's Ubuntu and macOS runners. There is no MSRV policy and
+  no published crates or binaries.
+
+The on-disk format is versioned (schema v3). Databases created by every earlier
+phase are upgraded in place, and tests cover that from real fixtures.
+
+## Benchmarks: what has and has not been measured
+
+The recorded numbers in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#benchmarks)
+are real Criterion runs. Each is one run, on one Apple M3 (8 GB) laptop, with
+hardware and conditions listed:
+
+| Suite | Measured? |
+|-------|-----------|
+| `event_store` (Phase 1) | yes, one recorded run |
+| `reconstruction` (Phase 2) | yes, one recorded run |
+| `crash_lab` (Phase 3) | yes, one recorded run |
+| HTTP API latency or throughput | **not measured**. The API only reports per-request server timings. |
+| Web UI performance | **not measured** |
+| Any other hardware or OS | **not measured** |
+
+CI runs every benchmark once in Criterion's `--test` mode, to catch breakage,
+but records no measurements.
 
 ## Contributing, security, license
 

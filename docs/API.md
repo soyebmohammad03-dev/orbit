@@ -23,6 +23,8 @@ curl http://127.0.0.1:7878/api/v1/health
 | `ORBIT_DB_PATH` | `data/orbit.db` | SQLite file. Created, with its directory, on first start. Phase 1–3 databases are migrated. |
 | `ORBIT_API_CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Browser origins allowed by CORS (exact match, GET/POST only) |
 | `ORBIT_BENCHMARK_DIR` | `target/criterion` if present | Criterion results served read-only by `/benchmarks`. An empty value disables it. |
+| `ORBIT_API_ALLOWED_HOSTS` | none | Extra host names accepted in the `Host` header, comma-separated. `localhost`, `127.0.0.1` and `[::1]` are always accepted. |
+| `ORBIT_API_REQUEST_TIMEOUT_SECS` | `30` | Per-request deadline (1–600 s). Requests over it get `503 request_timeout`. |
 | `ORBIT_DURABILITY`, `ORBIT_BUSY_TIMEOUT_MS`, `ORBIT_MAX_PAYLOAD_BYTES`, `ORBIT_MAX_METADATA_BYTES` | see [DEVELOPMENT.md](DEVELOPMENT.md#configuration) | Store settings |
 | `RUST_LOG` | `info,tower_http=info` | Log filter |
 
@@ -60,6 +62,23 @@ curl http://127.0.0.1:7878/api/v1/health
   and responses never contain the database path. Request bodies are limited to
   the payload limit plus the metadata limit plus 64 KiB (1.125 MiB by default).
   Page sizes are capped at 500, and `/explain` at 1,000 events.
+- **Host allowlist (DNS-rebinding defence).** A request is served only if its
+  `Host` names an allowed host: `localhost`, `127.0.0.1`, `[::1]`, plus any
+  `ORBIT_API_ALLOWED_HOSTS`. Requests without a `Host` are refused too. CORS
+  alone does not protect a localhost API: a malicious page can rebind its own
+  domain to `127.0.0.1`, and the browser then treats it as same-origin. That
+  page's requests still carry the attacker's host name, and are rejected with
+  `403 host_not_allowed`.
+- **No simple cross-site writes.** `POST` bodies must be `application/json`.
+  That forces a CORS preflight, which only the configured origins pass. A
+  cross-site form post (`text/plain`) is rejected with `415` before anything is
+  written.
+- **Deadlines.** Each request has a deadline (30 s by default). When it is
+  exceeded, the client gets `503 request_timeout` with class `retryable`.
+  Synchronous SQLite work cannot be cancelled midway, so **a timed-out write
+  may still complete**. Retry writes idempotently, with `expected_sequence` or
+  a caller-chosen `event_id`. Lock waits are bounded separately by the store's
+  `busy_timeout`.
 
 ## Endpoints
 
@@ -113,12 +132,14 @@ the error came from the engine. The HTTP status follows from it:
 | Status | Meaning |
 |--------|---------|
 | 400 | Malformed parameter or path, or failed validation |
+| 403 | `host_not_allowed`: the `Host` header is not in the allowlist |
 | 404 | Missing resource, or an unknown route (`route_not_found`) |
 | 409 | Conflict |
 | 413 | Request body over the limit |
+| 415 | `POST` body not sent as `application/json` |
 | 422 | The engine rejected the request: target beyond head, projection failure, unusable snapshot, payload over the store limit, or a malformed body |
 | 500 | Integrity violation, database or incompatibility |
-| 503 | `busy`: the SQLite lock was not obtained in time, so retry |
+| 503 | `busy` (the SQLite lock was not obtained within the busy timeout) or `request_timeout` (the request deadline passed); both are retryable |
 
 ## Example session
 

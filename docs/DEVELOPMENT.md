@@ -47,8 +47,16 @@ CI (`.github/workflows/ci.yml`) has three jobs:
 3. **End-to-end**: builds `orbit-api`, installs Chromium, and runs the
    Playwright workflow against a fresh SQLite database.
 
-The Rust job runs `fmt --check`, `check`, `clippy`, `test`,
-`doc`, `bench --no-run` and both examples, with `--locked`, on Ubuntu and macOS.
+The Rust job runs, with `--locked`, on Ubuntu and macOS:
+
+- `fmt --check` and `check`;
+- `clippy --all-targets --all-features`, plus `clippy --lib` with default
+  features (the production build, without fault hooks);
+- `test` and `doc`;
+- `bench --no-run` and all three examples.
+
+On Ubuntu it also runs every benchmark once, in Criterion's `--test` mode. That
+is a smoke test, not a measurement.
 
 ## Tests
 

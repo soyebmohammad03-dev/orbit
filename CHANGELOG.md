@@ -6,6 +6,33 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-18
+
+The first tagged release, a pre-1.0 release. It contains all five planned
+phases. See the README's "Release status" section for why this is not 1.0.0.
+
+### Added — Phase 5: verification, hardening and release
+
+- `orbit-api` `Host` allowlist (DNS-rebinding defence): only loopback names by
+  default, extendable with `ORBIT_API_ALLOWED_HOSTS`. Requests without a `Host`
+  are refused.
+- A per-request deadline (`ORBIT_API_REQUEST_TIMEOUT_SECS`, default 30 s). It
+  returns `503 request_timeout`, documented as possibly-completed for writes.
+- A warning log when listening on a non-loopback address.
+- `tests/hardening.rs`: Host allowlist, refusal of simple cross-site posts,
+  narrow CORS preflight, a deterministic timeout test, and no local paths in
+  errors.
+- CI:
+  - clippy with `--all-features`, plus a default-features library lint;
+  - every benchmark run once in Criterion `--test` mode.
+
+### Fixed — Phase 5
+
+- The web pages overflowed horizontally on narrow screens. All eight pages now
+  fit at 375, 768 and 1440 px, and mobile navigation wraps.
+- The Replay Lab's "Execute with" list was hard-coded. It now lists the
+  projections the API reports.
+
 ### Added — Phase 4: Observatory
 
 - `crates/orbit-api`: an Axum HTTP API at `/api/v1`.
