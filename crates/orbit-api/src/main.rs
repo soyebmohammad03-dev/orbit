@@ -30,13 +30,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || EventStore::open(store_config)
     })
     .await??;
-    let app = router(
-        AppState::new(store, config.benchmark_dir.clone()),
-        &config.cors_origins,
-    );
+    let state = AppState::new(store, config.benchmark_dir.clone())
+        .with_allowed_hosts(config.allowed_hosts.clone())
+        .with_request_timeout(config.request_timeout);
+    let app = router(state, &config.cors_origins);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
-    tracing::info!(addr = %listener.local_addr()?, "ORBIT Observatory API listening; OpenAPI at /api/v1/openapi.json");
+    let addr = listener.local_addr()?;
+    if !addr.ip().is_loopback() {
+        tracing::warn!(%addr, "listening on a non-loopback address: this API has NO authentication; use trusted networks only");
+    }
+    tracing::info!(%addr, "ORBIT Observatory API listening (OpenAPI at /api/v1/openapi.json)");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

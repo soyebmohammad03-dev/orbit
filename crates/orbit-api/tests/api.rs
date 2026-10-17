@@ -721,6 +721,7 @@ async fn cors_allows_only_the_configured_origin() {
             .clone()
             .oneshot(
                 Request::get("/api/v1/health")
+                    .header("host", "localhost:7878")
                     .header("origin", origin)
                     .body(Body::empty())
                     .unwrap(),

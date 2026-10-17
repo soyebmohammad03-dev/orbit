@@ -53,7 +53,10 @@ impl TestApi {
     }
 
     pub async fn send(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-        let builder = Request::builder().method(method).uri(uri);
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:7878");
         let request = match body {
             Some(body) => builder
                 .header("content-type", "application/json")

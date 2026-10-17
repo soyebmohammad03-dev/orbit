@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use orbit_core::config::{ConfigError, StoreConfig};
 
@@ -11,6 +12,12 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 pub const DEFAULT_DB_PATH: &str = "data/orbit.db";
 /// Default allowed CORS origins: the local Next.js development server.
 pub const DEFAULT_CORS_ORIGINS: &str = "http://localhost:3000,http://127.0.0.1:3000";
+/// Host names always accepted in the `Host` header (loopback only).
+pub const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+/// Default per-request deadline.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Largest accepted per-request deadline.
+pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Configuration of the API server.
 #[derive(Debug, Clone)]
@@ -23,6 +30,11 @@ pub struct ApiConfig {
     pub cors_origins: Vec<String>,
     /// Directory of Criterion results to expose read-only at `/api/v1/benchmarks`.
     pub benchmark_dir: Option<PathBuf>,
+    /// Accepted `Host` header names (lowercase, without port). Requests with
+    /// any other `Host` are rejected, which defeats DNS-rebinding attacks.
+    pub allowed_hosts: Vec<String>,
+    /// Deadline for one request.
+    pub request_timeout: Duration,
 }
 
 /// Invalid API configuration.
@@ -34,6 +46,16 @@ pub enum ApiConfigError {
     /// The listen address could not be parsed.
     #[error("ORBIT_API_ADDR={0:?} is not a socket address")]
     Addr(String),
+    /// A setting had an unparseable or out-of-range value.
+    #[error("{name}={value:?} is invalid: {reason}")]
+    Invalid {
+        /// Variable name.
+        name: &'static str,
+        /// Rejected value.
+        value: String,
+        /// Why.
+        reason: String,
+    },
     /// A non-loopback address was requested without explicit opt-in.
     #[error(
         "refusing to listen on non-loopback address {0}: the API has no authentication. \
@@ -60,6 +82,8 @@ impl ApiConfig {
     /// | `ORBIT_DB_PATH` | `data/orbit.db` |
     /// | `ORBIT_API_CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` |
     /// | `ORBIT_BENCHMARK_DIR` | `target/criterion` if it exists |
+    /// | `ORBIT_API_ALLOWED_HOSTS` | none (only `localhost`, `127.0.0.1`, `[::1]` are accepted in `Host`) |
+    /// | `ORBIT_API_REQUEST_TIMEOUT_SECS` | `30` (1–600) |
     ///
     /// plus every store variable understood by [`StoreConfig::from_lookup`].
     ///
@@ -92,11 +116,49 @@ impl ApiConfig {
             Some(_) => None,
             None => Some(PathBuf::from("target/criterion")).filter(|p| p.is_dir()),
         };
+        let mut allowed_hosts: Vec<String> =
+            LOOPBACK_HOSTS.iter().map(|h| (*h).to_owned()).collect();
+        if let Some(extra) = lookup("ORBIT_API_ALLOWED_HOSTS") {
+            for host in extra.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+                let host = host.to_ascii_lowercase();
+                if host.contains('/') || host.contains(' ') {
+                    return Err(ApiConfigError::Invalid {
+                        name: "ORBIT_API_ALLOWED_HOSTS",
+                        value: extra.clone(),
+                        reason: "expected comma-separated host names without scheme or path"
+                            .to_owned(),
+                    });
+                }
+                if !allowed_hosts.contains(&host) {
+                    allowed_hosts.push(host);
+                }
+            }
+        }
+        let request_timeout = match lookup("ORBIT_API_REQUEST_TIMEOUT_SECS") {
+            None => DEFAULT_REQUEST_TIMEOUT,
+            Some(value) => {
+                let secs = value
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|s| (1..=MAX_REQUEST_TIMEOUT.as_secs()).contains(s));
+                Duration::from_secs(secs.ok_or_else(|| ApiConfigError::Invalid {
+                    name: "ORBIT_API_REQUEST_TIMEOUT_SECS",
+                    value: value.clone(),
+                    reason: format!(
+                        "expected whole seconds between 1 and {}",
+                        MAX_REQUEST_TIMEOUT.as_secs()
+                    ),
+                })?)
+            }
+        };
         Ok(Self {
             addr,
             store,
             cors_origins,
             benchmark_dir,
+            allowed_hosts,
+            request_timeout,
         })
     }
 }
@@ -147,6 +209,40 @@ mod tests {
             ApiConfig::from_lookup(lookup(&[("ORBIT_API_ADDR", "nonsense")])),
             Err(ApiConfigError::Addr(_))
         ));
+    }
+
+    #[test]
+    fn host_allowlist_and_timeout() {
+        let config = ApiConfig::from_lookup(lookup(&[])).unwrap();
+        assert_eq!(
+            config.allowed_hosts,
+            vec!["localhost", "127.0.0.1", "[::1]"]
+        );
+        assert_eq!(config.request_timeout, DEFAULT_REQUEST_TIMEOUT);
+        let config = ApiConfig::from_lookup(lookup(&[
+            ("ORBIT_API_ALLOWED_HOSTS", "Orbit.Internal, localhost"),
+            ("ORBIT_API_REQUEST_TIMEOUT_SECS", "5"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.allowed_hosts,
+            vec!["localhost", "127.0.0.1", "[::1]", "orbit.internal"]
+        );
+        assert_eq!(config.request_timeout, Duration::from_secs(5));
+        for (name, value) in [
+            ("ORBIT_API_REQUEST_TIMEOUT_SECS", "0"),
+            ("ORBIT_API_REQUEST_TIMEOUT_SECS", "601"),
+            ("ORBIT_API_REQUEST_TIMEOUT_SECS", "soon"),
+            ("ORBIT_API_ALLOWED_HOSTS", "http://evil.test/"),
+        ] {
+            assert!(
+                matches!(
+                    ApiConfig::from_lookup(lookup(&[(name, value)])),
+                    Err(ApiConfigError::Invalid { .. })
+                ),
+                "{name}={value}"
+            );
+        }
     }
 
     #[test]

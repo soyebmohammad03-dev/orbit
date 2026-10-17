@@ -18,12 +18,13 @@ pub mod routes;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request};
-use axum::http::{HeaderValue, Method, header};
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
+use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{get, post};
 use orbit_core::EventStore;
@@ -44,6 +45,10 @@ pub struct AppState {
     pub benchmark_dir: Option<PathBuf>,
     /// Maximum request body size in bytes.
     pub max_body_bytes: usize,
+    /// Accepted `Host` header names (lowercase, without port).
+    pub allowed_hosts: Arc<Vec<String>>,
+    /// Deadline for one request.
+    pub request_timeout: Duration,
 }
 
 impl AppState {
@@ -57,7 +62,81 @@ impl AppState {
             store: Arc::new(store),
             engines: Engines::builtin(),
             benchmark_dir,
+            allowed_hosts: Arc::new(
+                config::LOOPBACK_HOSTS
+                    .iter()
+                    .map(|h| (*h).to_owned())
+                    .collect(),
+            ),
+            request_timeout: config::DEFAULT_REQUEST_TIMEOUT,
         }
+    }
+
+    /// Replaces the accepted `Host` names (see [`ApiConfig::allowed_hosts`]).
+    #[must_use]
+    pub fn with_allowed_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.allowed_hosts = Arc::new(hosts);
+        self
+    }
+
+    /// Replaces the per-request deadline.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+}
+
+/// The host name part of a `Host` header value: `[::1]:7878` → `[::1]`,
+/// `localhost:3000` → `localhost`. Lowercased.
+fn host_name(value: &str) -> String {
+    let value = value.trim();
+    let name = if value.starts_with('[') {
+        value.split_inclusive(']').next().unwrap_or(value)
+    } else {
+        value.rsplit_once(':').map_or(value, |(name, _port)| name)
+    };
+    name.to_ascii_lowercase()
+}
+
+/// Rejects requests whose `Host` is not in the allowlist (DNS-rebinding
+/// defence: CORS alone does not stop a rebound page, which the browser treats
+/// as same-origin), then applies the per-request deadline.
+async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(host_name);
+    let allowed = host
+        .as_ref()
+        .is_some_and(|h| state.allowed_hosts.iter().any(|a| a == h));
+    if !allowed {
+        tracing::warn!(host = ?host, "rejected request with a non-allowlisted Host header");
+        return error::ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "host_not_allowed",
+            message: "the Host header is not allowed; this API only serves local clients (see ORBIT_API_ALLOWED_HOSTS)"
+                .to_owned(),
+            class: None,
+            details: serde_json::Value::Null,
+        }
+        .into_response();
+    }
+    match tokio::time::timeout(state.request_timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => error::ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "request_timeout",
+            message: format!(
+                "the request did not complete within {} s; the engine operation may still finish, \
+                 so retry writes idempotently (expected_sequence or event_id)",
+                state.request_timeout.as_secs_f64()
+            ),
+            class: Some(orbit_core::ErrorClass::Retryable),
+            details: serde_json::Value::Null,
+        }
+        .into_response(),
     }
 }
 
@@ -154,8 +233,23 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
     Router::new()
         .nest("/api/v1", api)
         .layer(DefaultBodyLimit::max(body_limit))
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
         .layer(middleware::from_fn(timing))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_name;
+
+    #[test]
+    fn host_names_are_extracted_without_port() {
+        assert_eq!(host_name("127.0.0.1:7878"), "127.0.0.1");
+        assert_eq!(host_name("LOCALHOST"), "localhost");
+        assert_eq!(host_name("[::1]:7878"), "[::1]");
+        assert_eq!(host_name("[::1]"), "[::1]");
+        assert_eq!(host_name("evil.example:80"), "evil.example");
+    }
 }
