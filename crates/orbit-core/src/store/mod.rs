@@ -26,9 +26,11 @@
 mod replay;
 mod schema;
 mod snapshots;
+mod summary;
 mod verify;
 
 pub use snapshots::{NewSnapshot, SavedSnapshot};
+pub use summary::{StoreStatistics, StreamSummary};
 pub use verify::{ReplayRecordIssue, SnapshotIntegrityIssue, StoreIntegrityReport};
 
 use std::sync::{Mutex, MutexGuard};

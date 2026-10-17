@@ -310,7 +310,7 @@ impl From<rusqlite::Error> for StoreError {
 }
 
 /// Details of [`StoreError::SnapshotConflict`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, thiserror::Error)]
 #[error(
     "conflicting snapshot for stream {stream}, projection {projection}, sequence {sequence}: existing {existing} has state digest {existing_digest}, offered state digest is {offered_digest}"
 )]

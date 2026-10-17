@@ -63,7 +63,9 @@ pub use reconstruct::{
     ReconstructionReport, Reconstructor, SnapshotPolicy, Target,
 };
 pub use snapshot::{ProjectionKey, Snapshot, SnapshotId};
-pub use store::{EventStore, NewSnapshot, SavedSnapshot, StoreIntegrityReport};
+pub use store::{
+    EventStore, NewSnapshot, SavedSnapshot, StoreIntegrityReport, StoreStatistics, StreamSummary,
+};
 
 /// Compiles the README example as a doctest so it cannot drift from the API.
 #[cfg(doctest)]

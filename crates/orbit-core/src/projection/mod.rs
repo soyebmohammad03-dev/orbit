@@ -24,6 +24,9 @@
 //!   serialized state must give back an equivalent state.
 
 pub mod examples;
+pub mod merge_patch;
+
+pub use merge_patch::MergePatch;
 
 use std::fmt;
 
