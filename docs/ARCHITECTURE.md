@@ -1,7 +1,24 @@
 # Architecture
 
-Phases 1–3 deliver one library crate, `orbit-core`, inside a Cargo workspace
-(see [ADR 0003](adr/0003-single-crate-concrete-store.md)). Phase 1 is the
+The workspace has two crates and a web application:
+
+- **`crates/orbit-core`.** The engine, built in Phases 1–3.
+- **`crates/orbit-api`.** The HTTP API, added in Phase 4.
+- **`web/`.** The Observatory UI, added in Phase 4.
+
+The engine stays authoritative. The API and UI are transport and presentation
+over it (see [ADR 0008](adr/0008-observatory-architecture.md),
+[API.md](API.md) and [OBSERVATORY.md](OBSERVATORY.md)).
+
+```mermaid
+flowchart LR
+    ui["web/ (Next.js, client-rendered pages)"] -->|"HTTP /api/v1 JSON"| api["orbit-api (Axum)"]
+    api -->|"spawn_blocking"| core["orbit-core"]
+    core --> db[("SQLite (WAL)")]
+```
+
+Inside `orbit-core`, Phases 1–3 are organised as follows (see
+[ADR 0003](adr/0003-single-crate-concrete-store.md)). Phase 1 is the
 event store. Phase 2 adds projections, historical reconstruction, snapshots
 and state diffs on top of it. Phase 3 adds fault injection, store-wide
 verification with checkpoints, and deterministic replay.
@@ -153,6 +170,7 @@ See [REPLAY.md](REPLAY.md) and [RECOVERY.md](RECOVERY.md).
 | Snapshots bound to an event digest, with no long transactions during reconstruction | [ADR 0005](adr/0005-snapshot-binding-and-boundary.md) |
 | Feature-gated fault hooks and child-process crash tests | [ADR 0006](adr/0006-fault-injection-and-crash-testing.md) |
 | Self-contained replay runs with a per-event state-digest trace | [ADR 0007](adr/0007-replay-run-records.md) |
+| A thin Axum API over the synchronous engine, and a client-rendered UI | [ADR 0008](adr/0008-observatory-architecture.md) |
 
 Smaller choices:
 
@@ -173,10 +191,7 @@ Smaller choices:
 
 ## Extension points for later phases
 
-- **Phase 4 (API).** Every report is `Serialize`, and requests have
-  validating `Deserialize`. This includes reconstruction reports, diffs,
-  snapshot statuses, integrity reports, store reports, replay executions and
-  experiment reports. Error detail structs and `ErrorClass` map directly to
-  HTTP statuses. The Axum layer will call the store through `spawn_blocking`.
-- **Phase 5 (hardening).** Benchmarks exist for every subsystem. OS-crash and
-  power-loss testing would need a VM-level harness, and is out of scope so far.
+- **Phase 5 (release hardening).** Versioned release artifacts, broader
+  end-to-end coverage, and possibly a read-connection pool behind
+  `EventStore` if multi-user API load ever matters. OS-crash and power-loss
+  testing would need a VM-level harness and is out of scope so far.

@@ -3,3 +3,7 @@
 *.db-wal
 *.db-shm
 .DS_Store
+# Default orbit-api database directory
+/data/
+# Local editor/agent tooling configuration (machine-specific paths)
+/.claude/

@@ -6,6 +6,35 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Phase 4: Observatory
+
+- `crates/orbit-api`: an Axum HTTP API at `/api/v1`.
+  - Endpoints for health, capabilities, overview, streams and events
+    (cursor pagination, optimistic concurrency), state reconstruction, diffs,
+    explanations, snapshots with validation, checkpoints, stream and store
+    verification, replay runs, executions, experiments, and Criterion results.
+  - A structured error envelope and an OpenAPI 3.1 document (utoipa).
+  - CORS, body limits, `Server-Timing`, and localhost-only binding by default.
+- `web/`: the ORBIT Observatory, in Next.js 16 App Router with strict
+  TypeScript and Tailwind CSS 4. Pages: Overview, Streams, Events, Time
+  Travel, Snapshots, Replay Lab, Integrity and Benchmarks, all backed by the
+  real API.
+- `orbit-core`:
+  - the `projection::MergePatch` projection (`merge-patch@v1`, RFC 7386);
+  - `EventStore::{stream_summaries, stream_summary, statistics, recent_events, latest_snapshot_sequence}`;
+  - `Serialize` for `SnapshotConflict`.
+- Tests: API contract and TCP tests, web unit and component tests (Vitest),
+  and a Playwright end-to-end workflow. CI jobs for web checks and the
+  end-to-end test.
+- `scripts/seed-demo.sh`, `docs/API.md`, `docs/OBSERVATORY.md`, ADR 0008, and
+  genuine screenshots.
+
+### Changed
+
+- The history of `main` was rewritten once, at the owner's request, to remove
+  AI co-author trailers from the Phase 1 and Phase 2 commit messages. Trees,
+  authors and dates are unchanged.
+
 ### Added — Phase 3: crash lab
 
 - Fault injection: `fault::FaultPoint` at every write-path boundary, and a

@@ -44,3 +44,62 @@ jobs:
           cargo run -p orbit-core --example quickstart --locked
           cargo run -p orbit-core --example time_travel --locked
           cargo run -p orbit-core --example crash_lab --locked
+
+  web:
+    name: web (lint, types, unit tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Format
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit and component tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  e2e:
+    name: end-to-end (API + web + SQLite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the API
+        run: cargo build -p orbit-api --locked
+      - name: Install web dependencies and Chromium
+        working-directory: web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run the workflow test
+        working-directory: web
+        run: npm run test:e2e
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7

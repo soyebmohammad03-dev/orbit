@@ -15,7 +15,12 @@ affected commit.
 
 ## Security model and known limitations
 
-- ORBIT is an embedded library. It has no network surface in Phase 1.
+- The `orbit-core` library has no network surface. The `orbit-api` server
+  (Phase 4) is a **local development tool without authentication**. It binds to
+  `127.0.0.1` by default and refuses non-loopback addresses unless
+  `ORBIT_API_ALLOW_REMOTE=1` is set. Do not expose it to untrusted networks.
+  CORS allows only the configured local origins. The API accepts no SQL and no
+  file paths from clients, and never returns the database path.
 - Event digests are **unkeyed SHA-256**. They detect accidental corruption and
   naive modification of stored events. They do **not** protect against
   anyone who can write the database file, because such a party can recompute

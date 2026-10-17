@@ -10,6 +10,12 @@
   that is Xcode Command Line Tools (`xcode-select --install`).
 - Nothing else. No database server, network service or paid API is needed.
 
+## Web prerequisites
+
+Node.js ≥ 20.9 and npm. Tested with Node 24.21 and npm 11.19. The web app's
+dependencies are pinned by `web/package-lock.json`. The end-to-end test needs
+Playwright's Chromium once: `cd web && npx playwright install chromium`.
+
 ## Everyday commands
 
 ```bash
@@ -23,7 +29,25 @@ cargo run -p orbit-core --example time_travel # reconstruction, snapshots, diff
 cargo run -p orbit-core --example crash_lab   # verification, checkpoints, replay, divergence
 ```
 
-CI (`.github/workflows/ci.yml`) runs `fmt --check`, `check`, `clippy`, `test`,
+Observatory:
+
+```bash
+cargo run -p orbit-api                       # API on 127.0.0.1:7878, database data/orbit.db
+cd web && npm run dev                        # UI on localhost:3000
+scripts/seed-demo.sh                         # demonstration data, through the API
+cd web && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build
+cd web && npm run test:e2e                   # starts its own API and production web server on ports 7879/3100
+```
+
+CI (`.github/workflows/ci.yml`) has three jobs:
+
+1. **Rust** (Ubuntu and macOS): everything below, for both crates.
+2. **Web**: Prettier, ESLint with zero warnings, `tsc`, Vitest, and the
+   production build.
+3. **End-to-end**: builds `orbit-api`, installs Chromium, and runs the
+   Playwright workflow against a fresh SQLite database.
+
+The Rust job runs `fmt --check`, `check`, `clippy`, `test`,
 `doc`, `bench --no-run` and both examples, with `--locked`, on Ubuntu and macOS.
 
 ## Tests
@@ -47,6 +71,11 @@ CI (`.github/workflows/ci.yml`) runs `fmt --check`, `check`, `clippy`, `test`,
 | `tests/integrity_diagnostics.rs` | Categories and affected event ids, invalid genesis, swapped events, inconsistent empty head, checkpoints versus a recomputed rewrite and versus truncation, `verify_store` over damaged events, snapshots, runs and triggers, foreign-key violations |
 | `tests/replay.rs`           | Recording, persistence and reopen, determinism, snapshot and reconstructed starts, refusal of damaged inputs, and every outcome: exact, reconverged, diverged (first event localised), projection failure, version mismatch, invalid input, altered expectation, damaged history and boundary, truncated history, corrupt start snapshot (warning), experiments |
 | `tests/replay_properties.rs` | Proptest: replay is exact and deterministic; with a drifting projection, the first divergence is exactly the first affected event; random fault schedules never commit failed appends |
+| `tests/summaries.rs`        | Stream summaries, store statistics, recent events (used by the API) |
+| `orbit-api` `tests/api.rs`  | HTTP contract: every endpoint's success and error responses, validation, pagination bounds, conflicts, payload and body limits, projections, snapshots (including tampering), integrity success and failure, replay outcomes, experiments, overview, restarts, benchmarks, CORS |
+| `orbit-api` `tests/server.rs` | Real TCP server: concurrent optimistic appends over HTTP (exactly one winner), no duplicate sequences, persistence across a server restart |
+| `web/tests/unit`            | API client (URLs, bodies, error envelope, network errors, timing header), formatters, DiffView, ErrorState and EmptyState, navigation, the Overview page's loading, empty, data, error/retry and unrun-check states |
+| `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API |
 | `tests/reconstruction_properties.rs` | Proptest: snapshot-assisted equals full replay equals reference fold (counter and inventory, varied snapshot intervals and targets), the newest eligible snapshot is selected, deterministic diffs |
 
 Every integration test uses a real SQLite file in its own temporary directory.
@@ -271,6 +300,14 @@ What these numbers show:
   additions in an ADR.
 
 ## Configuration
+
+The API's own variables (`ORBIT_API_ADDR`, `ORBIT_API_ALLOW_REMOTE`,
+`ORBIT_API_CORS_ORIGINS`, `ORBIT_BENCHMARK_DIR`) are listed in
+[API.md](API.md#running). The web app reads `NEXT_PUBLIC_ORBIT_API_URL`
+(default `http://127.0.0.1:7878/api/v1`; see `web/.env.example`). It is
+baked in at build time.
+
+Store settings:
 
 `StoreConfig::from_env()` reads:
 

@@ -16,6 +16,8 @@ Thanks for your interest. ORBIT is being built in phases (see the
    cargo doc --workspace --no-deps
    ```
 
+   For the web app: `cd web && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build`.
+   For API or UI changes, also run `npm run test:e2e`.
 3. Add tests that exercise the real SQLite implementation. Do not mock the
    storage layer to make a test pass.
 4. Update the documentation and `CHANGELOG.md` when behaviour changes.
