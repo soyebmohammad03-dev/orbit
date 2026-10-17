@@ -70,3 +70,47 @@ pub fn seed(store: &EventStore, stream: &StreamId, count: u64) {
         store.append(stream, req(n)).expect("append");
     }
 }
+
+pub fn inc(by: u64) -> AppendRequest {
+    AppendRequest::new(ty("counter.incremented"), json!({ "by": by }))
+}
+
+pub fn dec(by: u64) -> AppendRequest {
+    AppendRequest::new(ty("counter.decremented"), json!({ "by": by }))
+}
+
+pub fn reset() -> AppendRequest {
+    AppendRequest::new(ty("counter.reset"), json!({}))
+}
+
+pub fn inventory(event_type: &str, payload: Value) -> AppendRequest {
+    AppendRequest::new(ty(event_type), payload)
+}
+
+/// Creates `stream` and appends `requests` in order.
+pub fn seed_with(store: &EventStore, stream: &StreamId, requests: Vec<AppendRequest>) {
+    store
+        .create_stream(stream, Metadata::new())
+        .expect("create stream");
+    for request in requests {
+        store.append(stream, request).expect("append");
+    }
+}
+
+/// `count` counter increments where event `n` increments by `n`.
+pub fn counter_stream(store: &EventStore, stream: &StreamId, count: u64) {
+    seed_with(store, stream, (1..=count).map(inc).collect());
+}
+
+pub fn at(n: u64) -> orbit_core::Target {
+    orbit_core::Target::At(orbit_core::Sequence::new(n).expect("valid sequence"))
+}
+
+pub fn seqn(n: u64) -> orbit_core::Sequence {
+    orbit_core::Sequence::new(n).expect("valid sequence")
+}
+
+/// Sum 1..=n, the counter value after `counter_stream(.., n)`.
+pub fn triangle(n: u64) -> i64 {
+    i64::try_from(n * (n + 1) / 2).expect("small")
+}

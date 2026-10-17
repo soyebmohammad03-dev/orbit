@@ -116,6 +116,15 @@ name_type!(
     "event type"
 );
 
+name_type!(
+    /// Name of a [`Projection`](crate::projection::Projection), e.g. `inventory`.
+    ///
+    /// Uses the same grammar as [`StreamId`]. Together with a version it
+    /// forms a [`ProjectionKey`](crate::snapshot::ProjectionKey).
+    ProjectionId,
+    "projection id"
+);
+
 /// Globally unique event identifier (a UUID; ORBIT generates version 7).
 ///
 /// Event ids identify events; they do **not** define order. Order is given

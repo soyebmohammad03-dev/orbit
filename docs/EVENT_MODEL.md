@@ -108,3 +108,16 @@ Each event stores `prev_digest` and `digest`. Together they form a SHA-256
 hash chain per stream, and the stream row stores the head digest. The exact
 construction and what it can and cannot detect are specified in
 [STORAGE_DESIGN.md](STORAGE_DESIGN.md#integrity-verification).
+
+## From events to state (Phase 2)
+
+Events are facts. *State* is derived by folding a stream's events, in sequence
+order, through a `Projection`. The state "at sequence `n`" is the result of
+applying events `1..=n` to the projection's initial state. Sequence 0 is the
+initial state. The position reconstructed is always a sequence number, never a
+timestamp. Snapshots are cached states for a given (stream, projection key,
+sequence), and are derived data. See [RECONSTRUCTION.md](RECONSTRUCTION.md) and
+[SNAPSHOTS.md](SNAPSHOTS.md).
+
+`ProjectionId` uses the same grammar as stream ids and event types.
+`ProjectionKey` is `{ id, version ≥ 1 }`, rendered as `counter@v1`.

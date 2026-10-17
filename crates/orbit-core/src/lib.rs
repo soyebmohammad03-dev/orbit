@@ -1,7 +1,8 @@
 //! # orbit-core
 //!
 //! The core of ORBIT: a persistent, append-only event store with ordered
-//! streams and hash-chained integrity verification, backed by SQLite.
+//! streams and hash-chained integrity verification, backed by SQLite, plus
+//! historical state reconstruction from those streams.
 //!
 //! ```no_run
 //! use orbit_core::{AppendRequest, EventStore, EventType, Metadata, StoreConfig, StreamId};
@@ -24,26 +25,41 @@
 //! Module overview:
 //!
 //! * [`domain`] — validated identifiers, streams, events, canonical JSON;
-//! * [`store`] — [`EventStore`], the SQLite persistence layer;
+//! * [`store`] — [`EventStore`], the SQLite persistence layer (events and snapshots);
 //! * [`integrity`] — digest construction and verification reports;
+//! * [`projection`] — the [`Projection`] trait and example projections;
+//! * [`reconstruct`] — [`Reconstructor`]: historical state, snapshots, diffs, provenance;
+//! * [`snapshot`] — snapshot types, digest and validation outcomes;
+//! * [`diff`] — structural JSON diff;
 //! * [`config`] — [`StoreConfig`] and environment loading;
 //! * [`error`] — [`StoreError`] and [`ValidationError`].
 
 pub mod config;
+pub mod diff;
 pub mod domain;
 pub mod error;
 pub mod integrity;
+pub mod projection;
+pub mod reconstruct;
 mod record;
+pub mod snapshot;
 pub mod store;
 
 pub use config::{Durability, Limits, StoreConfig};
+pub use diff::{Change, ChangeKind};
 pub use domain::{
-    AppendRequest, Digest, EventId, EventType, ExpectedSequence, Metadata, SchemaVersion, Sequence,
-    StoredEvent, Stream, StreamHead, StreamId, Timestamp,
+    AppendRequest, Digest, EventId, EventType, ExpectedSequence, Metadata, ProjectionId,
+    SchemaVersion, Sequence, StoredEvent, Stream, StreamHead, StreamId, Timestamp,
 };
-pub use error::{StoreError, ValidationError};
+pub use error::{SnapshotConflict, StoreError, ValidationError};
 pub use integrity::{IntegrityIssue, IntegrityReport};
-pub use store::EventStore;
+pub use projection::{Projection, ProjectionError, ProjectionErrorKind};
+pub use reconstruct::{
+    ProjectionFailure, ReconstructOptions, Reconstruction, ReconstructionError,
+    ReconstructionReport, Reconstructor, SnapshotPolicy, Target,
+};
+pub use snapshot::{ProjectionKey, Snapshot, SnapshotId};
+pub use store::{EventStore, NewSnapshot, SavedSnapshot};
 
 /// Compiles the README example as a doctest so it cannot drift from the API.
 #[cfg(doctest)]

@@ -14,7 +14,7 @@ use crate::error::{Result, StoreError};
 pub(crate) const APPLICATION_ID: i64 = 0x4F52_4254;
 
 /// Ordered migrations; index `i` upgrades the schema from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[MIGRATION_1];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
 
 /// Newest schema version known to this build.
 pub(crate) const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -93,6 +93,49 @@ CREATE TRIGGER streams_no_delete
 BEFORE DELETE ON streams
 BEGIN
     SELECT RAISE(ABORT, 'orbit: streams cannot be deleted');
+END;
+";
+
+/// Snapshots (Phase 2).
+///
+/// * a snapshot can only be inserted if the event it claims to be built on
+///   exists with exactly the recorded digest, so a snapshot can never claim
+///   history that is not in the store;
+/// * at most one snapshot per (stream, projection id, projection version, sequence);
+/// * snapshots are immutable. They are derived data and may be deleted;
+///   ORBIT never depends on a particular snapshot existing.
+///
+/// The unique constraint's index also serves "newest compatible snapshot at
+/// or before sequence N" lookups.
+const MIGRATION_2: &str = r"
+CREATE TABLE snapshots (
+    snapshot_id        BLOB    NOT NULL PRIMARY KEY CHECK (length(snapshot_id) = 16),
+    stream_id          TEXT    NOT NULL REFERENCES streams (stream_id) ON DELETE RESTRICT,
+    sequence           INTEGER NOT NULL CHECK (sequence >= 1),
+    projection_id      TEXT    NOT NULL CHECK (length(projection_id) BETWEEN 1 AND 128),
+    projection_version INTEGER NOT NULL CHECK (projection_version BETWEEN 1 AND 4294967295),
+    event_digest       BLOB    NOT NULL CHECK (length(event_digest) = 32),
+    state              TEXT    NOT NULL CHECK (json_valid(state)),
+    state_digest       BLOB    NOT NULL CHECK (length(state_digest) = 32),
+    created_at         INTEGER NOT NULL CHECK (created_at >= 0),
+    UNIQUE (stream_id, projection_id, projection_version, sequence)
+) STRICT;
+
+CREATE TRIGGER snapshots_insert_matches_history
+BEFORE INSERT ON snapshots
+WHEN NOT EXISTS (
+        SELECT 1 FROM events
+        WHERE stream_id = NEW.stream_id
+          AND sequence = NEW.sequence
+          AND digest = NEW.event_digest)
+BEGIN
+    SELECT RAISE(ABORT, 'orbit: snapshot must reference an existing event and its digest');
+END;
+
+CREATE TRIGGER snapshots_no_update
+BEFORE UPDATE ON snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'orbit: snapshots are immutable');
 END;
 ";
 

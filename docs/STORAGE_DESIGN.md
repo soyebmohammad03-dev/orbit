@@ -15,7 +15,7 @@ Each `EventStore` opens one SQLite connection with the following settings:
 | `foreign_keys`       | `ON`                                       | Enforces `events.stream_id → streams`. |
 | `busy_timeout`       | 5 s (configurable, max 600 s)              | How long to wait for another connection's lock before returning `StoreError::Busy`. |
 | `application_id`     | `0x4F524254` ("ORBT")                      | Marks ORBIT files. Foreign files are refused. |
-| `user_version`       | schema version (currently `1`)             | Migration bookkeeping. |
+| `user_version`       | schema version (currently `2`)             | Migration bookkeeping. |
 
 SQLite is compiled from source (`rusqlite` `bundled` feature), so every
 platform uses the same SQLite version, with JSON functions and `STRICT` tables.
@@ -49,6 +49,20 @@ CREATE TABLE events (
 Timestamps are stored as integer microseconds since the Unix epoch (UTC).
 Event ids are stored as 16 raw bytes, and digests as 32 raw bytes.
 
+### Schema version 2: snapshots
+
+Migration 2 adds the `snapshots` table, its unique index on
+`(stream_id, projection_id, projection_version, sequence)`, and two triggers:
+`snapshots_insert_matches_history` (a snapshot must reference an existing
+event and its exact digest) and `snapshots_no_update`. The full definition and
+semantics are in [SNAPSHOTS.md](SNAPSHOTS.md#storage-schema-migration-2).
+Snapshots may be deleted, because they are derived data. Events and streams
+still cannot be.
+
+`tests/fixtures/schema_v1.sql` is a dump of a database written by the
+Phase 1 code. `tests/schema.rs` loads it and checks that opening it upgrades
+the file in place to v2, with events intact and verifiable.
+
 ### Indexes
 
 - `streams` primary key on `stream_id`, for head lookups.
@@ -57,7 +71,8 @@ Event ids are stored as 16 raw bytes, and digests as 32 raw bytes.
   It also makes duplicate sequence numbers impossible.
 - `UNIQUE (event_id)`, for global uniqueness and the duplicate-id check.
 
-No other indexes exist. Phase 2 may add some for snapshot lookups.
+- `snapshots` primary key on `snapshot_id`, and the unique index above for
+  "newest compatible snapshot at or before N" lookups.
 
 ### Triggers: the database defends its own invariants
 
@@ -114,8 +129,11 @@ which runs *after* the insert, and checks that the inserted row is gone.
 `create_stream` uses the same `BEGIN IMMEDIATE` pattern with
 `INSERT … ON CONFLICT DO NOTHING`.
 
-Reads (`event`, `read_stream`, `read_after`, `verify_stream`) run inside a
-deferred read transaction. In WAL mode that gives a consistent snapshot of the
+`save_snapshot` uses `BEGIN IMMEDIATE` too: it checks the stream, the head and
+the event digest, then inserts. See [SNAPSHOTS.md](SNAPSHOTS.md).
+
+Reads (`event`, `read_stream`, `read_after`, `verify_stream`, `list_snapshots`,
+`check_snapshot`) run inside a deferred read transaction. In WAL mode that gives a consistent snapshot of the
 stream row and its events, even while another connection is appending.
 
 ## Concurrency behaviour

@@ -27,3 +27,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "reconstruction"
+harness = false

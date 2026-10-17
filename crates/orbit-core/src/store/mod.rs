@@ -24,6 +24,9 @@
 //! the head between reading and advancing it.
 
 mod schema;
+mod snapshots;
+
+pub use snapshots::{NewSnapshot, SavedSnapshot};
 
 use std::sync::{Mutex, MutexGuard};
 

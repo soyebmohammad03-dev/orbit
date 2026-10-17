@@ -11,5 +11,5 @@ mod time;
 
 pub use digest::Digest;
 pub use event::{AppendRequest, ExpectedSequence, Metadata, StoredEvent, Stream, StreamHead};
-pub use ids::{EventId, EventType, MAX_NAME_LEN, SchemaVersion, Sequence, StreamId};
+pub use ids::{EventId, EventType, MAX_NAME_LEN, ProjectionId, SchemaVersion, Sequence, StreamId};
 pub use time::Timestamp;

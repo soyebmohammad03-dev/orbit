@@ -6,7 +6,8 @@
 //! configuration, domain and database failures.
 
 use crate::config::ConfigError;
-use crate::domain::{EventId, Sequence, StreamId};
+use crate::domain::{Digest, EventId, Sequence, StreamId};
+use crate::snapshot::{ProjectionKey, SnapshotId};
 
 /// Input rejected at a validation boundary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -86,6 +87,23 @@ pub enum ValidationError {
     /// A digest string was not 64 lowercase hexadecimal characters.
     #[error("digest must be 64 lowercase hexadecimal characters")]
     InvalidDigestHex,
+    /// Projection versions start at 1.
+    #[error("projection version must be at least 1, got {0}")]
+    InvalidProjectionVersion(u32),
+    /// The nil UUID is not a valid snapshot identifier.
+    #[error("snapshot id must not be the nil UUID")]
+    NilSnapshotId,
+    /// Snapshots can only be taken at sequence 1 or later.
+    #[error("snapshots cannot be taken at sequence 0 (the empty position)")]
+    SnapshotAtZero,
+    /// The canonical snapshot state exceeded the size limit.
+    #[error("snapshot state is {actual} bytes in canonical form; the maximum is {max}")]
+    SnapshotTooLarge {
+        /// Canonical state size in bytes.
+        actual: usize,
+        /// Maximum in bytes.
+        max: usize,
+    },
     /// A read limit of zero was requested.
     #[error("read limit must be at least 1")]
     ZeroLimit,
@@ -153,6 +171,37 @@ pub enum StoreError {
         /// Description of the defect.
         reason: String,
     },
+    /// No snapshot with this identifier exists.
+    #[error("snapshot {0} does not exist")]
+    SnapshotNotFound(SnapshotId),
+    /// A snapshot was offered for a position whose stored event digest
+    /// differs from the digest the snapshot claims to be built on, or for a
+    /// position beyond the stream head. Nothing was written.
+    #[error(
+        "snapshot for stream {stream} at sequence {sequence} does not match the stored history: {reason}"
+    )]
+    SnapshotHistoryMismatch {
+        /// Stream of the offered snapshot.
+        stream: StreamId,
+        /// Sequence the snapshot claims to represent.
+        sequence: Sequence,
+        /// What did not match.
+        reason: String,
+    },
+    /// A snapshot for the same stream, projection key and sequence already
+    /// exists with a *different* state. Projections must be deterministic, so
+    /// this indicates a non-deterministic projection or a changed projection
+    /// that kept its version number.
+    #[error(transparent)]
+    SnapshotConflict(Box<SnapshotConflict>),
+    /// A persisted snapshot row could not be decoded.
+    #[error("corrupt snapshot record {snapshot}: {reason}")]
+    CorruptSnapshot {
+        /// Snapshot id as stored (hex if it is not a valid UUID).
+        snapshot: String,
+        /// Description of the defect.
+        reason: String,
+    },
     /// The database file exists but was not created by ORBIT.
     #[error("not an ORBIT database: {0}")]
     NotAnOrbitDatabase(String),
@@ -179,6 +228,26 @@ impl From<rusqlite::Error> for StoreError {
             _ => StoreError::Database(DatabaseError(error)),
         }
     }
+}
+
+/// Details of [`StoreError::SnapshotConflict`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "conflicting snapshot for stream {stream}, projection {projection}, sequence {sequence}: existing {existing} has state digest {existing_digest}, offered state digest is {offered_digest}"
+)]
+pub struct SnapshotConflict {
+    /// Stream.
+    pub stream: StreamId,
+    /// Projection key.
+    pub projection: ProjectionKey,
+    /// Sequence.
+    pub sequence: Sequence,
+    /// The snapshot already stored.
+    pub existing: SnapshotId,
+    /// State digest of the stored snapshot.
+    pub existing_digest: Digest,
+    /// State digest of the offered snapshot.
+    pub offered_digest: Digest,
 }
 
 /// Convenience alias for results of store operations.

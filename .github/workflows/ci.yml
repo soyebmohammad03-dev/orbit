@@ -40,4 +40,6 @@ jobs:
       - name: Benchmarks compile
         run: cargo bench --workspace --no-run --locked
       - name: Example runs
-        run: cargo run -p orbit-core --example quickstart --locked
+        run: |
+          cargo run -p orbit-core --example quickstart --locked
+          cargo run -p orbit-core --example time_travel --locked
