@@ -23,7 +23,7 @@ export function PageHeader({
                 <h1 className="text-lg font-semibold tracking-tight text-text">{title}</h1>
                 {description ? <p className="mt-1 max-w-3xl text-sm text-muted">{description}</p> : null}
             </div>
-            {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+            {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
         </header>
     );
 }
@@ -42,9 +42,9 @@ export function Card({
     padded?: boolean;
 }) {
     return (
-        <section className={cx("rounded-lg border border-border bg-surface", className)}>
+        <section className={cx("min-w-0 rounded-lg border border-border bg-surface", className)}>
             {title || actions ? (
-                <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2.5">
                     {title ? (
                         <h2 className="text-xs font-semibold uppercase tracking-wider text-muted">{title}</h2>
                     ) : (

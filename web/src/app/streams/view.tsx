@@ -41,7 +41,7 @@ export function StreamsView() {
                 title="Streams"
                 description="Every stream in the store, ordered by id. Streams are created explicitly and never deleted."
             />
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
                 <div className="flex flex-col gap-6">
                     <Card title="All streams" padded={false}>
                         {page.loading && !page.data ? (

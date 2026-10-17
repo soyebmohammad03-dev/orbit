@@ -112,7 +112,7 @@ export function OverviewView() {
                         ) : null}
                     </Card>
 
-                    <div className="grid gap-6 lg:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                         <Card title="Most recently active streams" padded={false}>
                             {overview.data.active_streams.length === 0 ? (
                                 <p className="p-4 text-sm text-muted">No streams yet.</p>

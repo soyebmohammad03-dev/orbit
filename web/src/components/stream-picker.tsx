@@ -40,7 +40,7 @@ export function StreamPicker({
     const streams = useApi(() => api.listStreams({ limit: 500 }), "streams");
     const options = streams.data?.streams ?? [];
     return (
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 max-w-full items-center gap-2">
             <label htmlFor={id} className="text-xs font-medium text-muted">
                 Stream
             </label>
@@ -49,7 +49,7 @@ export function StreamPicker({
                 value={value ?? ""}
                 onChange={(e) => onChange(e.target.value)}
                 disabled={streams.loading || options.length === 0}
-                className="min-w-56"
+                className="min-w-0 max-w-full sm:min-w-56"
             >
                 <option value="" disabled>
                     {streams.loading ? "Loading streams…" : options.length === 0 ? "No streams yet" : "Select a stream"}
@@ -76,7 +76,7 @@ export function ProjectionPicker({
 }) {
     const caps = useApi(() => api.capabilities(), "capabilities");
     return (
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 max-w-full items-center gap-2">
             <label htmlFor={id} className="text-xs font-medium text-muted">
                 Projection
             </label>

@@ -21,7 +21,7 @@ export function isActive(pathname: string, href: string): boolean {
 export function Nav() {
     const pathname = usePathname() ?? "/";
     return (
-        <nav aria-label="Main" className="flex flex-col gap-0.5">
+        <nav aria-label="Main" className="flex flex-row flex-wrap gap-0.5 md:flex-col">
             {NAV_ITEMS.map((item) => {
                 const active = isActive(pathname, item.href);
                 return (

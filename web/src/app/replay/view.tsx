@@ -56,7 +56,7 @@ export function ReplayView() {
             {!stream ? (
                 <EmptyState title="Select a stream to record or inspect replay runs." />
             ) : (
-                <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
                     <div className="flex flex-col gap-6">
                         <Card title="Replay runs" padded={false}>
                             {runs.loading && !runs.data ? (
@@ -329,6 +329,7 @@ function RunDetail({ runId, onExecuted }: { runId: string; onExecuted: () => voi
     const [projection, setProjection] = useState("");
     const [last, setLast] = useState<ReplayExecution | null>(null);
     const execute = useAction(() => api.executeReplay(runId, projection || undefined));
+    const capabilities = useApi(() => api.capabilities(), "capabilities");
 
     if (inspection.loading && !inspection.data) return <Loading label="Loading run" />;
     if (inspection.error) return <ErrorState error={inspection.error} onRetry={inspection.reload} />;
@@ -390,9 +391,11 @@ function RunDetail({ runId, onExecuted }: { runId: string; onExecuted: () => voi
                                 <option value="">
                                     recorded projection ({run.projection.id}@v{run.projection.version})
                                 </option>
-                                <option value="merge-patch">merge-patch</option>
-                                <option value="counter">counter</option>
-                                <option value="inventory">inventory</option>
+                                {(capabilities.data?.projections ?? []).map((p) => (
+                                    <option key={p.key} value={p.id} title={p.description}>
+                                        {p.key}
+                                    </option>
+                                ))}
                             </Select>
                         </div>
                         <Button type="submit" variant="primary" busy={execute.pending}>

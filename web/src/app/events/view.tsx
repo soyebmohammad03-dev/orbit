@@ -66,7 +66,7 @@ export function EventsView() {
                     No streams yet? Create one on the <TextLink href="/streams">Streams</TextLink> page.
                 </EmptyState>
             ) : (
-                <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_26rem]">
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_26rem]">
                     <Card title={page.data ? `Events · head #${page.data.head_sequence}` : "Events"} padded={false}>
                         {page.loading && !page.data ? (
                             <div className="px-4">

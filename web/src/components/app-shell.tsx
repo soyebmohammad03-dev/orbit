@@ -13,7 +13,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 Skip to content
             </a>
             <aside className="border-b border-border bg-surface md:sticky md:top-0 md:h-screen md:w-56 md:shrink-0 md:border-b-0 md:border-r">
-                <div className="flex h-full flex-col gap-6 p-4">
+                <div className="flex h-full flex-col gap-3 p-4 md:gap-6">
                     <div>
                         <p className="font-mono text-sm font-semibold tracking-[0.2em] text-text">ORBIT</p>
                         <p className="text-xs text-faint">Observatory</p>

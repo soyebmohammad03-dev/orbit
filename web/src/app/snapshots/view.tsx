@@ -43,7 +43,7 @@ export function SnapshotsView() {
             {!stream ? (
                 <EmptyState title="Select a stream to inspect its snapshots." />
             ) : (
-                <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
                     <div className="flex flex-col gap-6">
                         <Card title="Snapshots" padded={false}>
                             {list.loading && !list.data ? (
