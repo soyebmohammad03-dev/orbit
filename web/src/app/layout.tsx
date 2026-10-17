@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import "./globals.css";
@@ -8,7 +9,7 @@ export const metadata: Metadata = {
     description: "Event-store observability and time-travel debugging for ORBIT.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: ReactNode }) {
     return (
         <html lang="en" className="h-full antialiased">
             <body className="min-h-full">
