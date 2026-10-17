@@ -33,7 +33,7 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Clippy (all targets, all features)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Clippy (libraries, default features: production build without fault hooks)
+      - name: Clippy (libraries with default features, i.e. the production build without fault hooks)
         run: cargo clippy --workspace --lib --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
