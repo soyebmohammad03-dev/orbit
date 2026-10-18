@@ -531,3 +531,65 @@ pub struct BenchmarksResponse {
     /// How to produce results when none exist.
     pub note: String,
 }
+
+/// Body of `POST /api/v1/lab/experiments`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateExperimentRequest {
+    /// Experiment kind. Only `differential_replay` exists.
+    pub kind: String,
+    /// The specification: `stream`, `left`, `right`, and optionally `from`,
+    /// `to`, `reference` (`left` or `right`) and `determinism_check`.
+    #[schema(value_type = Object)]
+    pub spec: Value,
+}
+
+/// Query of `GET /api/v1/lab/experiments`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ExperimentPageQuery {
+    /// Return experiments created before this one (an experiment id).
+    pub before: Option<String>,
+    /// Page size, 1–500 (default 50).
+    pub limit: Option<usize>,
+}
+
+/// A page of experiments, newest first.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExperimentPage {
+    /// Experiment summaries.
+    #[schema(value_type = Vec<Object>)]
+    pub experiments: Vec<Value>,
+    /// Pass as `before` to get the next page; absent on the last page.
+    pub next_before: Option<String>,
+}
+
+/// Registered implementations.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImplementationList {
+    /// Implementation descriptors.
+    #[schema(value_type = Vec<Object>)]
+    pub implementations: Vec<Value>,
+}
+
+/// One experiment with its verification history.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExperimentDetail {
+    /// The stored experiment.
+    #[schema(value_type = Object)]
+    pub experiment: Value,
+    /// Verifications, oldest first.
+    #[schema(value_type = Vec<Object>)]
+    pub verifications: Vec<Value>,
+}
+
+/// Result of an artifact check.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArtifactVerificationResponse {
+    /// What was found (`status`: `intact` or `damaged`).
+    #[schema(value_type = Object)]
+    pub report: Value,
+    /// The stored verification record.
+    #[schema(value_type = Object)]
+    pub verification: Value,
+}

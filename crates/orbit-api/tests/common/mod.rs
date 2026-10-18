@@ -48,6 +48,29 @@ impl TestApi {
         self.app = Self::build(&self.dir, Limits::default(), None);
     }
 
+    /// An API with the lab enabled (registry in `<tmp>/lab`).
+    pub fn with_lab() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let app = Self::build_with_lab(&dir);
+        Self { dir, app }
+    }
+
+    fn build_with_lab(dir: &TempDir) -> Router {
+        let config =
+            StoreConfig::new(dir.path().join("orbit.db")).with_durability(Durability::Normal);
+        let lab =
+            orbit_lab::Lab::open(&dir.path().join("lab"), orbit_lab::Catalog::builtin()).unwrap();
+        router(
+            AppState::new(EventStore::open(config).unwrap(), None).with_lab(lab),
+            &origins(),
+        )
+    }
+
+    /// Rebuilds a lab-enabled app on the same files (simulates a restart).
+    pub fn restart_with_lab(&mut self) {
+        self.app = Self::build_with_lab(&self.dir);
+    }
+
     pub fn raw(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(self.dir.path().join("orbit.db")).unwrap()
     }

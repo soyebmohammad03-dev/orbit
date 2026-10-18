@@ -30,9 +30,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || EventStore::open(store_config)
     })
     .await??;
-    let state = AppState::new(store, config.benchmark_dir.clone())
+    let mut state = AppState::new(store, config.benchmark_dir.clone())
         .with_allowed_hosts(config.allowed_hosts.clone())
         .with_request_timeout(config.request_timeout);
+    if let Some(dir) = config.lab_dir.clone() {
+        let lab = tokio::task::spawn_blocking(move || {
+            orbit_lab::Lab::open(&dir, orbit_lab::Catalog::builtin())
+        })
+        .await??;
+        state = state.with_lab(lab);
+    }
     let app = router(state, &config.cors_origins);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;

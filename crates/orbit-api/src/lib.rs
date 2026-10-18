@@ -49,6 +49,8 @@ pub struct AppState {
     pub allowed_hosts: Arc<Vec<String>>,
     /// Deadline for one request.
     pub request_timeout: Duration,
+    /// The experiment lab, if enabled. Its registry is a separate database.
+    pub lab: Option<Arc<orbit_lab::Lab>>,
 }
 
 impl AppState {
@@ -69,7 +71,15 @@ impl AppState {
                     .collect(),
             ),
             request_timeout: config::DEFAULT_REQUEST_TIMEOUT,
+            lab: None,
         }
+    }
+
+    /// Enables the lab endpoints with `lab`.
+    #[must_use]
+    pub fn with_lab(mut self, lab: orbit_lab::Lab) -> Self {
+        self.lab = Some(Arc::new(lab));
+        self
     }
 
     /// Replaces the accepted `Host` names (see [`ApiConfig::allowed_hosts`]).
@@ -162,7 +172,7 @@ async fn timing(request: Request, next: Next) -> Response {
 /// Builds the router. `cors_origins` are the browser origins allowed to call
 /// the API (exact matches only).
 pub fn router(state: AppState, cors_origins: &[String]) -> Router {
-    use routes::{integrity, replay, snapshots, state as st, streams, system};
+    use routes::{integrity, lab, replay, snapshots, state as st, streams, system};
     let origins: Vec<HeaderValue> = cors_origins
         .iter()
         .filter_map(|o| HeaderValue::from_str(o).ok())
@@ -222,6 +232,20 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
         .route(
             "/streams/{stream_id}/experiments",
             post(replay::run_experiment),
+        )
+        .route("/lab/implementations", get(lab::list_implementations))
+        .route(
+            "/lab/experiments",
+            get(lab::list_experiments).post(lab::create_experiment),
+        )
+        .route("/lab/experiments/{experiment_id}", get(lab::get_experiment))
+        .route(
+            "/lab/experiments/{experiment_id}/verify",
+            post(lab::verify_experiment),
+        )
+        .route(
+            "/lab/experiments/{experiment_id}/reproduce",
+            post(lab::reproduce_experiment),
         )
         .fallback(|| async {
             error::ApiError::not_found(

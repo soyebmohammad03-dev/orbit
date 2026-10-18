@@ -10,6 +10,8 @@ use orbit_core::config::{ConfigError, StoreConfig};
 pub const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 /// Default database path, relative to the working directory.
 pub const DEFAULT_DB_PATH: &str = "data/orbit.db";
+/// Default lab directory (experiment registry and artifacts), relative to the working directory.
+pub const DEFAULT_LAB_DIR: &str = "data/lab";
 /// Default allowed CORS origins: the local Next.js development server.
 pub const DEFAULT_CORS_ORIGINS: &str = "http://localhost:3000,http://127.0.0.1:3000";
 /// Host names always accepted in the `Host` header (loopback only).
@@ -35,6 +37,9 @@ pub struct ApiConfig {
     pub allowed_hosts: Vec<String>,
     /// Deadline for one request.
     pub request_timeout: Duration,
+    /// Lab directory (`lab.db` and artifacts), or `None` to disable the lab
+    /// endpoints.
+    pub lab_dir: Option<PathBuf>,
 }
 
 /// Invalid API configuration.
@@ -84,6 +89,7 @@ impl ApiConfig {
     /// | `ORBIT_BENCHMARK_DIR` | `target/criterion` if it exists |
     /// | `ORBIT_API_ALLOWED_HOSTS` | none (only `localhost`, `127.0.0.1`, `[::1]` are accepted in `Host`) |
     /// | `ORBIT_API_REQUEST_TIMEOUT_SECS` | `30` (1–600) |
+    /// | `ORBIT_LAB_DIR` | `data/lab` (empty disables the lab endpoints) |
     ///
     /// plus every store variable understood by [`StoreConfig::from_lookup`].
     ///
@@ -152,6 +158,11 @@ impl ApiConfig {
                 })?)
             }
         };
+        let lab_dir = match lookup("ORBIT_LAB_DIR") {
+            Some(dir) if dir.trim().is_empty() => None,
+            Some(dir) => Some(PathBuf::from(dir)),
+            None => Some(PathBuf::from(DEFAULT_LAB_DIR)),
+        };
         Ok(Self {
             addr,
             store,
@@ -159,6 +170,7 @@ impl ApiConfig {
             benchmark_dir,
             allowed_hosts,
             request_timeout,
+            lab_dir,
         })
     }
 }
@@ -189,6 +201,9 @@ mod tests {
             vec!["http://localhost:3000", "http://127.0.0.1:3000"]
         );
         assert_eq!(config.benchmark_dir, None);
+        assert_eq!(config.lab_dir, Some(PathBuf::from(DEFAULT_LAB_DIR)));
+        let disabled = ApiConfig::from_lookup(lookup(&[("ORBIT_LAB_DIR", " ")])).unwrap();
+        assert_eq!(disabled.lab_dir, None);
     }
 
     #[test]

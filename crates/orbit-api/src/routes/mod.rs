@@ -2,6 +2,7 @@
 //! the blocking thread pool, and maps the result to a DTO.
 
 pub mod integrity;
+pub mod lab;
 pub mod replay;
 pub mod snapshots;
 pub mod state;

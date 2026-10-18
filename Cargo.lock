@@ -956,6 +956,7 @@ dependencies = [
  "axum",
  "http-body-util",
  "orbit-core",
+ "orbit-lab",
  "reqwest",
  "rusqlite",
  "serde",

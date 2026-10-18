@@ -335,3 +335,57 @@ impl From<PathRejection> for ApiError {
         Self::bad_request("invalid_path", rejection.body_text())
     }
 }
+
+impl From<orbit_lab::LabError> for ApiError {
+    fn from(error: orbit_lab::LabError) -> Self {
+        use orbit_lab::LabError as E;
+        let message = error.to_string();
+        let (status, code, details) = match error {
+            E::Store(e) => return e.into(),
+            E::InvalidSpec { field, .. } => (
+                StatusCode::BAD_REQUEST,
+                "invalid_spec",
+                json!({ "field": field }),
+            ),
+            E::UnknownImplementation(id) => (
+                StatusCode::BAD_REQUEST,
+                "unknown_implementation",
+                json!({ "implementation": id }),
+            ),
+            E::ExperimentNotFound(id) => (
+                StatusCode::NOT_FOUND,
+                "experiment_not_found",
+                json!({ "experiment_id": id }),
+            ),
+            E::InvalidTransition { id, from, to } => (
+                StatusCode::CONFLICT,
+                "invalid_state",
+                json!({ "experiment_id": id, "status": from, "requested": to }),
+            ),
+            E::InvalidState { id, .. } => (
+                StatusCode::CONFLICT,
+                "invalid_state",
+                json!({ "experiment_id": id }),
+            ),
+            E::ArtifactMissing(_) | E::ArtifactCorrupted(_) | E::CorruptRecord { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "integrity_violation",
+                Value::Null,
+            ),
+            E::DuplicateImplementation(_)
+            | E::InvalidDescriptor(_)
+            | E::NotALabRegistry(_)
+            | E::UnsupportedSchemaVersion { .. }
+            | E::Registry(_)
+            | E::Io(_)
+            | E::Json(_) => (StatusCode::INTERNAL_SERVER_ERROR, "lab_error", Value::Null),
+        };
+        Self {
+            status,
+            code,
+            message,
+            class: None,
+            details,
+        }
+    }
+}
