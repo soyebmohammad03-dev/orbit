@@ -17,3 +17,10 @@ unreachable_pub = "warn"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+# SHA-256 runs over every event, snapshot, artifact and, once per process,
+# the executable (orbit-lab's build identity). Unoptimized it is slow enough
+# to dominate debug-build tests and the first lab experiment, so it is
+# optimized even in dev builds.
+[profile.dev.package.sha2]
+opt-level = 3

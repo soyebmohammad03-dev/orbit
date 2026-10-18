@@ -570,6 +570,7 @@ the Observatory under **Experiments**.
 | Changes per comparison | 200 (`MAX_RECORDED_CHANGES`), plus the total | bounds large state diffs |
 | Trace page | 1,000 entries in the library; 500 through the API (its page cap) | bounded responses |
 | States in memory | the current pair, plus one more pair while a diagnosed interval is open | no per-boundary state retention |
+| Executable digest | read and hashed once per process, starting in the background when the lab opens | build identity without per-experiment cost |
 
 One measurement, not a benchmark: `cargo run --release -p orbit-lab --example
 large_history -- 100000` on an Apple M3 (8 GB, macOS 27.0.1), 2026-10-18. It
@@ -585,6 +586,14 @@ diverge and converge 10,000 times, then runs one differential replay.
 
 This is one run on one machine. Times depend on the projections, state sizes
 and storage.
+
+The executable digest costs one read and hash of the binary per process. In
+the first CI run of Sprint 8, a debug build hashed it on the first request,
+with unoptimized SHA-256, and an end-to-end assertion timed out. `sha2` is
+now optimized in dev builds (`[profile.dev.package.sha2]` in `Cargo.toml`),
+and the hash starts when the lab opens. Locally, with a 34 MB debug
+`orbit-api`, the first experiment request went from 0.46 s to 0.011 s
+(one measurement each, the second with the background hash already finished).
 
 ## Known limitations
 

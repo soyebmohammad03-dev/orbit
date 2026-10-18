@@ -129,6 +129,9 @@ impl Lab {
             catalog,
             locks,
         };
+        // Hash the executable in the background, so the first experiment
+        // usually does not wait for it (`BuildInfo::current` reuses it).
+        std::thread::spawn(crate::identity::executable_digest);
         let recovered = lab.recover_interrupted()?;
         if !recovered.is_empty() {
             tracing::warn!(
