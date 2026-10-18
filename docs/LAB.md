@@ -10,8 +10,30 @@
 - **differential replay**: two implementations over one ordered history,
   with first-divergence diagnosis.
 
-It is exposed through a library, an `orbit-lab` CLI, five API endpoints and
-the Observatory's **Experiments** page.
+It is exposed through a library, an `orbit-lab` CLI, API endpoints and
+the Observatory's **Experiments**, **Performance** and **Evidence** pages.
+
+One registry and one lifecycle cover every experiment kind:
+
+| Kind | Created with | Run by | Reproduced by |
+|---|---|---|---|
+| `differential_replay` | `Lab::create`, API, CLI `run` | the creating process (API: within the request) | re-execution against the event store, or from a bundle |
+| `reliability` | `Lab::create_reliability` | only the `orbit-reliability` tool ([RELIABILITY.md](RELIABILITY.md)) | the same tool |
+| `performance` | `Lab::create_performance`, API, CLI `measure` | the creating process (API: a background thread) ([PERFORMANCE.md](PERFORMANCE.md)) | a new, linked measurement |
+
+Every kind shares the same components:
+- the validated spec and its envelope digest;
+- the build identity;
+- the lifecycle, enforced by the database;
+- an immutable completed result, or a structured failure;
+- content-addressed artifacts;
+- an append-only verification history, where every reproduction attempt
+  gets one status from [`ReproductionStatus`](../crates/orbit-lab/src/reproduction.rs);
+- export as a portable bundle ([EVIDENCE.md](EVIDENCE.md)).
+
+Experiment failures (`history_unavailable`, `interrupted`, …) are kept
+apart from failures of the experiment infrastructure (`infrastructure`),
+and neither is ever recorded as a result.
 
 Nothing here is a statistical or scientific claim. A differential replay
 reports exactly what two pieces of code computed over one history.
@@ -59,6 +81,9 @@ flowchart LR
 <lab dir>/artifacts/sha256/ab/cdef…    artifact bytes, named by their SHA-256
 <lab dir>/artifacts/tmp/               in-progress artifact writes
 <lab dir>/locks/<experiment id>.lock   held while an experiment runs
+<lab dir>/locks/<experiment id>.create held by its creator until it starts
+<lab dir>/performance-work/<id>/       a running measurement's files (removed after)
+<lab dir>/reliability-work/<id>/       a running scenario's files (removed after)
 ```
 
 The default lab directory is `data/lab`, next to the default `data/orbit.db`.
@@ -66,7 +91,7 @@ Change it with `--lab` or `ORBIT_LAB_DIR`. `data/` is git-ignored.
 
 ## Registry
 
-### Schema (version 3)
+### Schema (version 4)
 
 | Table | Purpose |
 |-------|---------|
@@ -74,6 +99,8 @@ Change it with `--lab` or `ORBIT_LAB_DIR`. `data/` is git-ignored.
 | `artifacts` | `digest` (PK), `media_type`, `size`, `created_at`. One row per distinct content. |
 | `experiment_artifacts` | `(experiment_id, role)` → `digest`. Links are only accepted while the experiment is `running`. |
 | `verifications` | Append-only history of checks: `kind` is `artifacts` or `reproduction`, plus `status`, `detail` and `verified_at`. Only finished experiments can be verified. |
+| `imported_bundles` | v4. One row per imported evidence bundle, keyed by bundle digest; never updated or deleted, and never mixed with `experiments` ([EVIDENCE.md](EVIDENCE.md)). |
+| `bundle_verifications` | v4. Append-only reproduction attempts of imported bundles. |
 
 `experiments` columns:
 
@@ -98,8 +125,9 @@ transaction:
 | 1 | 7 | Tables, triggers and constraints above |
 | 2 | 8 | Adds `experiments.executable_digest` and adds it to the immutable identity columns (the trigger is recreated). Existing rows keep `NULL`. |
 | 3 | 9 | Adds the kind `reliability` ([RELIABILITY.md](RELIABILITY.md)). For it, `stream_id`, `left_impl`, `right_impl` and the completed `input` are optional; differential replays still require them (a `CHECK`). SQLite cannot alter a `CHECK`, so `experiments` is rebuilt: triggers are dropped, rows copied, triggers recreated unchanged. Migrations run with foreign keys off, followed by `PRAGMA foreign_key_check`; any violation refuses to open. |
+| 4 | Phase 9 | Adds the kind `performance` (same optional columns as `reliability`) by rebuilding `experiments` the same way, an index on `(kind, id)`, and the append-only `imported_bundles` and `bundle_verifications` tables. Existing rows are copied unchanged. |
 
-Sprint 7 registries open unchanged in content (v1 → v2 → v3). A test loads a real Sprint 7
+Sprint 7 registries open unchanged in content (v1 → v2 → v3 → v4). A test loads a real Sprint 7
 registry, event store and artifacts (`tests/fixtures/sprint7/`, dumped from
 commit `a44e62f`), migrates it, reads every record, verifies its artifacts and
 reproduces its experiments.
@@ -137,7 +165,9 @@ created ──▶ running ──▶ completed
   | `invalid_range` | The requested range is not valid for this stream |
   | `implementation_unavailable` | The implementation is not registered, or its fingerprint changed |
   | `interrupted` | The run stopped before finishing |
-  | `internal` | Any other error |
+  | `abandoned` | The process that created it stopped before starting it (see below) |
+  | `infrastructure` | A reliability scenario or a performance workload could not set itself up; says nothing about the system under test |
+  | `internal` | Any other error, including a performance iteration that returned a wrong result |
 
 Only these transitions exist. They are enforced twice:
 
@@ -162,6 +192,25 @@ however the process ends. `Lab::open` checks every `running` experiment:
   alone.
 
 A partially executed experiment is never marked `completed`.
+
+<a id="abandoned-experiments"></a>**Abandoned experiments.** Every
+`create_*` takes an exclusive lock on `locks/<id>.create` *before* the
+registry row exists, and keeps it until the experiment starts. `Lab::open`
+(`recover_abandoned`) marks a `created` experiment `failed`/`abandoned` when
+that file exists and its lock can be taken, meaning its creator is gone.
+The update applies only while the row is still `created`, so a started
+experiment is never touched. A live creator, however long it waits, keeps
+its lock.
+
+To let another process run a created experiment, call `Lab::release(id)`:
+it deletes the file before unlocking, and the experiment becomes unowned,
+which is never abandoned automatically. Experiments created by versions
+without creation locks have no file either and are left alone.
+
+Dropping a `Lab` without running what it created releases the locks. The
+next recovery then marks those experiments abandoned. Tests:
+`tests/abandonment.rs`, plus the real-process case
+`experiment_created/process_killed`.
 
 **Concurrency.** Several `Registry` values, in one process or several, may
 use one `lab.db`. Writes use `BEGIN IMMEDIATE` and wait up to 5 s for the
@@ -452,7 +501,11 @@ The `reasons` field says why.
 ### Reproducing and verifying
 
 - **`Lab::reproduce`** (CLI `reproduce`, API `POST …/reproduce`) re-executes a
-  completed experiment and compares it with the original. Nothing is
+  completed differential replay and compares it with the original
+  (performance experiments are measured again instead, see
+  [PERFORMANCE.md](PERFORMANCE.md)). The statuses below are shared by
+  every kind and by bundles (`ReproductionStatus`, which adds
+  `inconclusive` and `unsupported`). Nothing is
   substituted. Checks run in this order, and the first that fails decides:
 
   | Status | Meaning |
@@ -462,6 +515,7 @@ The `reasons` field says why.
   | `implementation_unavailable` | An implementation is not registered, or its fingerprint changed |
   | `history_unavailable` | The stream is missing, too short, or fails verification |
   | `history_changed` | The events at the recorded boundaries have different digests (e.g. another store with a same-named stream) |
+  | `artifact_missing` | A recorded artifact is missing or damaged, so the original evidence cannot be compared (Phase 9) |
   | `reproduced` | Same result (below) |
   | `differs` | A different result. `detail.differences` names what differs: `left_trace`, `right_trace`, `result_document`, or summary fields. |
 
@@ -484,12 +538,12 @@ The `reasons` field says why.
   `corrupted`, and the overall status is `intact` or `damaged`. The check is
   recorded.
 
-The registry does not copy event histories. Reproduction needs the same
-event store. If that history is gone or damaged, the lab says so and does not
-claim the result is reproducible. Portable bundles that include the history
-are a later sprint. The smallest change that would make reproduction
-independent of the original store is a history artifact: a copy of events
-`1..=to` with their digests, verifiable by recomputing the chain.
+The registry does not copy event histories. Local reproduction needs the
+same event store. If that history is gone or damaged, the lab says so and
+does not claim the result is reproducible. An evidence bundle exported while
+the store still holds the history carries events `1..=to`; a differential
+replay can then be reproduced from the bundle alone, over the verified
+events ([EVIDENCE.md](EVIDENCE.md)).
 
 ### Artifact safety
 
@@ -611,8 +665,7 @@ and the hash starts when the lab opens. Locally, with a 34 MB debug
 
 ## Known limitations
 
-- **One kind and one adapter.** Differential replay is the only experiment
-  kind, and Rust `Projection`s compiled into the binary are the only
+- **One adapter.** Rust `Projection`s compiled into the binary are the only
   implementations. There is no plugin loading.
 - **Lockstep from 0.** Both sides always fold from event 1. Snapshots are not
   used, because a snapshot is one implementation's state.
@@ -624,15 +677,17 @@ and the hash starts when the lab opens. Locally, with a 34 MB debug
 - **Positional array diffs**, as in the core.
 - **The fingerprint does not cover code bodies** (see above), and the
   determinism check can disprove determinism but cannot prove it.
-- **Reproduction needs the original event store.** There is no portable
-  evidence bundle yet.
+- **Reproduction needs the event history,** from the original store or from
+  a bundle that includes it.
 - **Identity is coarse at its best.** The executable digest covers the whole
   binary, not one implementation, and Sprint 7 records have none.
 - **Only completed experiments have traces.** A failed experiment records no
   artifacts.
-- **Synchronous API runs.** `POST /lab/experiments` runs synchronously. Past
-  the request deadline the client gets `503 request_timeout`, while the
-  experiment still finishes and is recorded.
+- **Synchronous differential runs.** `POST /lab/experiments` runs a
+  differential replay synchronously. Past the request deadline the client
+  gets `503 request_timeout`, while the experiment still finishes and is
+  recorded. Performance runs are accepted and measured in the background.
+  Neither can be cancelled.
 - **Unkeyed digests.** Like the core's, they detect accidental corruption and
   naive edits, not a party able to rewrite both the files and the digests.
 - **Rename durability.** Artifact directories are not `fsync`ed after rename,

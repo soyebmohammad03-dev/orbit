@@ -62,6 +62,8 @@ curl http://127.0.0.1:7878/api/v1/health
 - **Safety.** There is no SQL from clients and no client-supplied file paths,
   and responses never contain the database path. Request bodies are limited to
   the payload limit plus the metadata limit plus 64 KiB (1.125 MiB by default).
+  Only the two bundle upload routes accept more: up to 32 MiB, the bundle size
+  limit (see [Lab endpoints](#lab-endpoints)).
   Page sizes are capped at 500, and `/explain` at 1,000 events.
 - **Host allowlist (DNS-rebinding defence).** A request is served only if its
   `Host` names an allowed host: `localhost`, `127.0.0.1`, `[::1]`, plus any
@@ -121,11 +123,19 @@ Responses are the lab's own serialized records.
 | Method and path | Purpose | Success | Notable errors |
 |-----------------|---------|---------|----------------|
 | `GET /lab/implementations` | Registered implementation descriptors (id, name, declared projection, type, fingerprint) | 200 | 503 `lab_unavailable` |
-| `GET /lab/experiments?before=&limit=` | Experiment summaries, newest first, with a cursor (`next_before`) | 200 | 400 `invalid_parameter`, 400 `invalid_experiment_id` |
-| `POST /lab/experiments` | `{kind: "differential_replay", spec: {stream, left, right, from?, to?, reference?, determinism_check?}}` validates, records and runs an experiment. **A missing or damaged history is a `failed` experiment (201), not an HTTP error.** | 201 | 400 `invalid_spec` (unknown fields are rejected), 400 `unknown_implementation`, 400 `unsupported_experiment_kind` |
+| `GET /lab/experiments?before=&limit=&kind=` | Experiment summaries, newest first, with a cursor (`next_before`); `kind` filters by `differential_replay`, `reliability` or `performance` | 200 | 400 `invalid_parameter`, 400 `invalid_experiment_id` |
+| `POST /lab/experiments` | `{kind: "differential_replay", spec: {stream, left, right, from?, to?, reference?, determinism_check?}}` validates, records and runs an experiment. **A missing or damaged history is a `failed` experiment (201), not an HTTP error.** `{kind: "performance", spec: {workload, input_size?, warmup_iterations?, measured_iterations?, seed?}}` records it and measures it **in the background** (202, status `created`; poll the experiment). | 201, 202 | 400 `invalid_spec` (unknown fields are rejected), 400 `unknown_implementation`, 400 `unsupported_experiment_kind`, 409 `measurement_in_progress` |
 | `GET /lab/experiments/{id}` | The stored experiment (spec, descriptors, build, lifecycle timestamps, input range, result, artifacts) and its verifications | 200 | 400, 404 `experiment_not_found` |
 | `POST /lab/experiments/{id}/verify` | Re-hashes the stored spec, result and every artifact. Records and returns the report (`intact` or `damaged`). | 200 | 404, 409 `invalid_state` (not finished) |
-| `POST /lab/experiments/{id}/reproduce` | Re-executes from the stored spec and compares with the original (`reproduced`, `differs`, `configuration_mismatch`, `not_reproducible`, `history_changed`, `history_unavailable`, `implementation_unavailable`; see [LAB.md](LAB.md#reproducing-and-verifying)). Records the attempt. | 201 | 404, 409 `invalid_state` (not completed) |
+| `POST /lab/experiments/{id}/reproduce` | Differential replay: re-executes from the stored spec and compares with the original (`reproduced`, `differs`, `configuration_mismatch`, `not_reproducible`, `history_changed`, `history_unavailable`, `implementation_unavailable`, `artifact_missing`; see [LAB.md](LAB.md#reproducing-and-verifying)), and records the attempt (201). Performance: starts a linked new measurement of the same spec (202, the new experiment); the comparison is appended to the original when it finishes. | 201, 202 | 404, 409 `invalid_state` (not completed, or a reliability experiment), 409 `measurement_in_progress` |
+| `GET /lab/experiments/{id}/bundle?history=` | The experiment as an evidence bundle: `application/json` attachment `orbit-evidence-<id>.json`, digest in `X-Orbit-Bundle-Digest`. A differential replay's input events are included while the store still holds the pinned history, unless `history=false` ([EVIDENCE.md](EVIDENCE.md)) | 200 | 404, 409 `invalid_state` (not finished, or larger than 32 MiB), 500 `integrity_violation` (damaged artifacts are never exported) |
+| `GET /lab/performance/workloads` | Workload catalog with bounds, iteration bounds, default regression policy, the server's build profile and whether a measurement is running | 200 | 503 |
+| `POST /lab/performance/compare` | `{baseline?, candidates: [id…] (1–10), threshold_percent?, alpha?}`. Compares completed performance experiments; nothing is stored. Without `baseline`, the newest compatible earlier one is used, or `status: "no_baseline"` ([PERFORMANCE.md](PERFORMANCE.md)) | 200 | 400 `invalid_parameter`, 404, 409 `invalid_state` (not a completed performance experiment) |
+| `POST /lab/bundles/validate` | Body: the bundle file (raw bytes, at most 32 MiB). Validates without storing; always 200 with the report (`valid`, `errors[].code`, `integrity`, `scientific_correctness: "not_verified"`, `history`) | 200 | 413 |
+| `POST /lab/bundles` | Body: the bundle file. Validates and imports; never creates or changes a local experiment | 201 (new), 200 (already imported) | 413, 422 `invalid_bundle` (report in `details`; nothing stored) |
+| `GET /lab/bundles?before=&limit=` | Imported bundles, newest first, with a cursor | 200 | 400 |
+| `GET /lab/bundles/{digest}` | Manifest, document (without entry contents), import-time validation report, reproduction attempts | 200 | 400 `invalid_bundle_digest`, 404 `bundle_not_found` |
+| `POST /lab/bundles/{digest}/reproduce` | Reproduces an imported bundle and appends the attempt: differential replays over the bundle's verified events (201); performance bundles are measured again in the background (202); reliability `unsupported`, failed `not_reproducible` | 201, 202 | 404, 409 `measurement_in_progress` |
 | `GET /lab/reliability/scenarios` | The reliability scenario catalog, read-only ([RELIABILITY.md](RELIABILITY.md)). They run only with the `orbit-reliability` tool; their results are ordinary experiments here (`kind: "reliability"`). | 200 | 503 `lab_unavailable` |
 | `GET /lab/experiments/{id}/trace?from=&limit=` | Per-boundary trace of a completed experiment: `{boundary, left, right, equal}` read from the verified trace artifacts, with a cursor (`next_from`) | 200 | 400 `invalid_parameter` (limit 1–500), 404, 409 `invalid_state` (not completed), 500 `integrity_violation` (trace artifact missing or corrupted) |
 
@@ -134,15 +144,32 @@ identity, `completeness` and `gaps`). Results recorded since Sprint 8
 (`result_version` 2) include `timeline`, `diagnosis`, `perspective` and
 `semantics`; older results are returned as stored. See [LAB.md](LAB.md).
 
-`POST /lab/experiments` accepts only `kind: "differential_replay"`. A
+`POST /lab/experiments` accepts `differential_replay` and `performance`. A
 request with `kind: "reliability"` gets `400 unsupported_experiment_kind`,
 because reliability scenarios inject faults and kill processes. Listing,
-inspecting and verifying reliability experiments works like any other
-kind; reproducing one through the API returns `409 invalid_state`.
+inspecting, verifying and exporting reliability experiments works like any
+other kind; reproducing one through the API returns `409 invalid_state`.
 
-`POST /lab/experiments` runs synchronously. If it outlasts the request
-deadline the response is `503 request_timeout`, and the experiment still
-finishes and is recorded.
+**Execution and cancellation.**
+- **Differential replays** run synchronously. If one outlasts the request
+  deadline, the response is `503 request_timeout`, and the experiment still
+  finishes and is recorded.
+- **Performance measurements** (new experiments, reproduction attempts and
+  bundle reproductions) run on one background thread per server, one at a
+  time; a second request gets `409 measurement_in_progress` and records
+  nothing. The registry is the only source of status: poll the experiment.
+- **Nothing can be cancelled.** A request timeout does not stop work. If the
+  server stops during a measurement, the experiment stays `running` and is
+  marked `failed`/`interrupted` the next time the lab is opened.
+- Measurements started here run inside the server process, so concurrent
+  requests can disturb them; [PERFORMANCE.md](PERFORMANCE.md) describes how
+  to measure with the CLI.
+
+**Bundles.** Upload bodies are raw bytes, never parsed by the framework,
+and are passed to the validator, which bounds size, nesting, entry count
+and sizes and rejects unsafe entry names. Bundle contents are never
+executed or written under their names. CORS exposes `X-Orbit-Bundle-Digest`
+and `Content-Disposition` to the configured origins.
 
 ```bash
 curl -s -X POST $API/lab/experiments -H 'content-type: application/json' -d \

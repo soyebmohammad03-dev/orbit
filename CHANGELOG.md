@@ -6,6 +6,59 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added: Phase 9, integrated platform
+
+- **One experiment model.** Registry schema v4 admits the `performance`
+  kind and adds the append-only `imported_bundles` and
+  `bundle_verifications` tables. Every kind is created under a creation
+  lock (`locks/<id>.create`); `Lab::open` marks experiments whose creator
+  died before starting them `failed`/`abandoned`, and never a started one.
+  `Lab::release` hands an experiment to another process.
+  `ReproductionStatus` is shared by every kind and by bundles; it adds
+  `artifact_missing`, `inconclusive` and `unsupported`.
+- **Reliability.** `experiment-interruption` version 2 adds a real-process
+  case: a creator killed with `SIGKILL` before starting. Reproducing
+  damaged evidence reports `artifact_missing`.
+- **Performance lab** (`orbit_lab::performance`, docs/PERFORMANCE.md):
+  - seven workloads, with warm-up and measured iterations, input size and
+    seed;
+  - per-iteration result checks, every sample recorded, and an
+    environment record;
+  - statistics with sample-count gating and distribution-free median
+    intervals;
+  - compatibility rules, threshold and Mann–Whitney verdicts, baseline
+    selection, and linked re-measurement;
+  - smoke and measurement evidence levels.
+- **Evidence bundles** (`orbit_lab::bundle`, docs/EVIDENCE.md):
+  - canonical JSON with an integrity manifest, artifacts and, when
+    available, the verified input events;
+  - bounded, strict validation with stable error codes;
+  - import kept apart from local experiments;
+  - reproduction from the bundle;
+  - fixtures and a property test.
+- **CLI.** `orbit-lab workloads | measure | compare | export | validate |
+  import | bundles | reproduce-bundle`.
+- **API.**
+  - Background performance runs and reproductions, one per server
+    (`409 measurement_in_progress`).
+  - `GET /lab/performance/workloads` and `POST /lab/performance/compare`.
+  - Bundle export (`GET /lab/experiments/{id}/bundle`), validation, import,
+    listing, detail and reproduction, with a 32 MiB limit on the upload
+    routes only.
+  - A `kind` filter on the experiment list.
+- **Observatory.** Performance and Evidence pages; performance results,
+  bundle export and linked reproduction on Experiments; grouped
+  navigation.
+- **CI.** A performance smoke run and bundle fixture validation, with no
+  timing assertions.
+
+### Changed: Phase 9
+
+- Verification badges use one set of labels for every kind (`Intact`,
+  `Reproduced`, …).
+- Differential replay reads events through an `EventSource` trait, so the
+  same code replays a store or a verified in-memory history.
+
 ### Added — Sprint 9: reliability laboratory
 
 - Reliability scenarios (`orbit_lab::reliability`), each with real child

@@ -32,6 +32,10 @@ cargo run -p orbit-lab -- run --stream S --left orbit.counter --right example.co
 cargo run -p orbit-lab -- trace <id>          # per-boundary digests
 cargo run --release -p orbit-lab --example large_history -- 100000   # one large run, prints sizes and time
 cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run event-append-interruption   # see RELIABILITY.md
+cargo run --release -p orbit-lab -- measure historical-reconstruction --iterations 30   # see PERFORMANCE.md
+cargo run -p orbit-lab -- compare <candidate id>     # against the newest compatible baseline
+cargo run -p orbit-lab -- export <id> --out bundle.json   # see EVIDENCE.md
+cargo run -p orbit-lab -- validate bundle.json
 ```
 
 The lab reads `data/orbit.db` and keeps its registry in `data/lab` (override
@@ -65,7 +69,11 @@ The Rust job runs, with `--locked`, on Ubuntu and macOS:
 - `test` and `doc`;
 - a check that `orbit-api`'s feature graph contains neither
   `orbit-core/fault-injection` nor `orbit-lab/reliability`;
-- `bench --no-run`, all three examples and `orbit-lab implementations`.
+- `bench --no-run`, all three examples and `orbit-lab implementations`;
+- a smoke run of one performance workload (2 iterations: it checks that a
+  measurement completes, never how fast it is), validation of the committed
+  valid bundle fixture, and a check that the committed truncated fixture is
+  rejected.
 
 On Ubuntu it also runs every benchmark once, in Criterion's `--test` mode. That
 is a smoke test, not a measurement.
@@ -103,9 +111,14 @@ is a smoke test, not a measurement.
 | `orbit-lab` `tests/reliability.rs` | Every reliability scenario end to end with real child processes (aborts at each core and lab fault point, `SIGKILL`, a paused live owner, 4 processes creating, racing to start and racing to recover), persistence across reopen, reproduction without modifying the original, infrastructure failures (no child binary), v3 schema constraints, the `orbit-reliability` tool's validation, no active hook in ordinary runs |
 | `orbit-api` `tests/lab.rs` (Sprint 9 additions) | The reliability catalog is listed; `kind: reliability` is rejected; no route runs scenarios; a timed-out experiment request still completes |
 | `orbit-lab` `tests/reproduction.rs` | Reproduction: identical, changed result (`differs` with what changed), tampered spec and other comparison rules (`configuration_mismatch`), nondeterministic results, missing implementation, changed or short history, later appends; a real Sprint 7 registry fixture migrated, read, verified and reproduced |
-| `orbit-lab` `tests/cli.rs`  | The `orbit-lab` binary: implementations, run (flags and `--spec`), list, show, verify, reproduce, error exits |
+| `orbit-lab` `tests/cli.rs`  | The `orbit-lab` binary: implementations, run (flags and `--spec`), list, show, verify, reproduce, error exits; `workloads`, `measure`, `compare`, performance `reproduce`; `export`, `validate`, `import`, `bundles`, `reproduce-bundle` and a truncated bundle |
+| `orbit-lab` `src/performance` unit tests | Statistics against independently computed answers (Python's `statistics` and `NormalDist`, Student t tables, SciPy's documented Mann–Whitney example), percentile and interval gating, invalid samples, every comparison verdict (identical, clear slowdown, tiny but significant, large but noisy, few samples), incompatibilities, policy bounds, spec validation, the configuration digest |
+| `orbit-lab` `tests/performance.rs` | Every workload through the lab, samples matching the summary, persistence, invalid specs recording nothing, infrastructure failures without results, baselines (none, found, given), incompatible seeds, linked reproduction leaving the original unchanged. No assertion depends on machine speed |
+| `orbit-lab` `tests/abandonment.rs` | Creation locks: live creators keep their experiments, dropped creators abandon them exactly once, released and started experiments are never abandoned, experiments without a lock file are left alone |
+| `orbit-lab` `tests/bundles.rs` and `src/bundle.rs` unit tests | Base64 against RFC 4648 vectors, entry-name rules, nesting, garbage input; round trip with deterministic bytes; exact reproduction in a lab without the original store; missing and changed histories; tampering (entries, record, result, events, unlisted, missing, unknown fields); a consistent forgery that validates and then fails reproduction; path traversal; performance, failed and reliability bundles; the committed fixtures; a 512-case single-byte property test |
+| `orbit-api` `tests/evidence.rs` | Background performance runs, comparison, kind filter, linked reproduction, invalid requests, one measurement at a time, bundle export headers, validation, import (201/200/422), reproduction, digests, the bundle routes' own size limit |
 | `web/tests/unit`            | API client (URLs, bodies, error envelope, network errors, timing header), formatters, DiffView, ErrorState and EmptyState, navigation, the Overview page's loading, empty, data, error/retry and unrun-check states |
-| `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API; a differential replay run, inspected, verified and reproduced from the Experiments page, which must fit a 375 px screen |
+| `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API; a differential replay run, inspected, verified and reproduced from the Experiments page, which must fit a 375 px screen; two performance measurements compared and inspected (Performance page at 375 px); a bundle downloaded from Experiments, validated, imported and reproduced on the Evidence page, and a tampered copy refused |
 | `tests/reconstruction_properties.rs` | Proptest: snapshot-assisted equals full replay equals reference fold (counter and inventory, varied snapshot intervals and targets), the newest eligible snapshot is selected, deterministic diffs |
 
 Every integration test uses a real SQLite file in its own temporary directory.

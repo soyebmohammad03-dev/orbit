@@ -39,7 +39,7 @@ else is rejected.
 |----------|------------|-------|
 | `event-append-interruption` v1 | `events` 1–500 (default 10) | 12 |
 | `snapshot-write-interruption` v1 | `events` 1–500 (default 10) | 6 |
-| `experiment-interruption` v1 | `events` 6–500 (default 8) | 7 |
+| `experiment-interruption` v2 | `events` 6–500 (default 8) | 8 |
 | `registry-concurrency` v1 | `processes` 2–8 (default 4), `experiments_per_process` 1–25 (default 5) | 3 |
 
 ### `event-append-interruption`
@@ -103,6 +103,10 @@ A completed **baseline** experiment exists first. Then:
 - **Process paused:** a child stops at `run_after_start` and waits on its
   stdin. While it is alive, another lab instance opens and recovers the
   registry. Then the child is released.
+- **Creator killed before start** (added in version 2): a child creates an
+  experiment and waits. While it is alive, another lab instance opens and
+  recovers the registry. Then the child is killed with `SIGKILL`, and the
+  registry is opened again.
 - **Deliberate corruption:** a byte of the baseline's `left_trace` file is
   flipped.
 
@@ -117,7 +121,11 @@ A completed **baseline** experiment exists first. Then:
   stored under an artifact name has exactly that content, so a half-written
   file is never accepted.
 - A corrupted artifact is reported `damaged`. Reading it fails with
-  `ArtifactCorrupted`, and the trace endpoint refuses it.
+  `ArtifactCorrupted`, and the trace endpoint refuses it. Reproducing its
+  experiment reports `artifact_missing`, never `reproduced`.
+- A created experiment is not abandoned while its creator lives. Once the
+  creator is killed, it is `failed`/`abandoned` exactly once, with no
+  result, and its creation lock file is removed.
 
 Artifact files written before an interruption but never linked are counted
 (`unlinked_artifact_files`) and left in place. They are complete,
@@ -247,8 +255,33 @@ working tree based on commit `1f18f61`, with default parameters:
 |----------|---------|-------|-----------|--------------------|---------|
 | `event-append-interruption` | `invariants_preserved` | 12 | 12 | 6 | 0.87 s |
 | `snapshot-write-interruption` | `invariants_preserved` | 6 | 6 | 3 | 0.39 s |
-| `experiment-interruption` | `invariants_preserved` | 7 | 7 | 5 | 0.17 s |
+| `experiment-interruption` (v1) | `invariants_preserved` | 7 | 7 | 5 | 0.17 s |
 | `registry-concurrency` | `invariants_preserved` | 3 | 3 | 3 | 0.22 s |
+
+After the Phase 9 change (version 2), `experiment-interruption` ran again
+on the same machine, from the working tree at commit `3339bfe`:
+`invariants_preserved`, 8 cases, 8 preserved, 6 real-process cases, 0.24 s.
+Its new case, abridged:
+
+```json
+{
+  "id": "experiment_created/process_killed",
+  "mode": "process_killed",
+  "fault_observed": true,
+  "fault_evidence": "the child created 01a14fab-ea90-7571-b02e-50e12fbdf4ce, another process opened the lab, then the child was terminated by SIGKILL (9)",
+  "invariants": [
+    { "name": "live_creator_not_abandoned", "observed": "created", "held": true },
+    { "name": "abandoned_after_creator_died", "observed": "failed Some(Abandoned) links: 0", "held": true },
+    { "name": "abandoned_exactly_once", "observed": "0 recovered", "held": true },
+    { "name": "creation_lock_removed", "observed": "absent", "held": true },
+    { "name": "earlier_result_preserved", "held": true }
+  ],
+  "verdict": "invariant_preserved"
+}
+```
+
+Reproducing a version 1 `experiment-interruption` result now reports
+`configuration_mismatch`: its scenario version is no longer the catalog's.
 
 One case from the first run, verbatim:
 
@@ -317,8 +350,13 @@ Two changes followed:
 - **Not covered:**
   - Locks are advisory and per host, so the registry must stay on a local
     file system.
-  - An experiment whose creator died before running it stays `created`.
-    That is accurate: it never started.
+  - An experiment whose creator died before starting it was left `created`
+    until Phase 9. Now every experiment is created while its creator holds
+    an OS lock on `locks/<id>.create`; recovery marks it
+    `failed`/`abandoned` once that lock is free, and only while it is still
+    `created`. Experiments released for another process to run, and ones
+    created by older versions, have no creation lock file and are left
+    alone. See [LAB.md](LAB.md#abandoned-experiments).
   - Windows is untested; the CI runners are Linux and macOS.
 
 ## Untested failure classes

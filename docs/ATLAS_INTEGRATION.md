@@ -27,8 +27,21 @@ Audited state: `main` at `7cc2cae`, tag `v0.1.0`, on 2026-10-18.
 >
 > Sprint 8, as redefined by its brief, delivered the divergence timeline,
 > diagnosis, identity completeness and reproduction classes instead of
-> evidence bundles. Evidence bundles and everything after them are still a
-> plan.
+> evidence bundles.
+>
+> Phase 9 implemented the rest, differing from this plan where noted:
+> - **Performance lab:** [PERFORMANCE.md](PERFORMANCE.md). One run per
+>   experiment, rather than the multi-trial design of §8, with comparison
+>   rules and a Mann–Whitney test.
+> - **Evidence bundles:** [EVIDENCE.md](EVIDENCE.md). One canonical JSON
+>   file rather than a directory.
+> - **Creation-lock recovery** of abandoned experiments.
+> - **Shared reproduction statuses.**
+> - **Observatory:** Performance and Evidence pages.
+>
+> Reliability scenarios remain runnable only from the `orbit-reliability`
+> tool, never the API (§9). This document is kept as the plan it was; the
+> linked documents describe what exists.
 
 ## 1. Verified repository and release state
 

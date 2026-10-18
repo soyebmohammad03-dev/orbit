@@ -57,6 +57,13 @@ jobs:
           cargo run -p orbit-core --example crash_lab --locked
           cargo run -p orbit-lab --locked -- --lab target/ci-lab implementations
           cargo run -p orbit-lab --example large_history --locked -- 500
+      - name: Performance and evidence smoke (no timing assertions)
+        run: |
+          cargo run -p orbit-lab --locked -- --lab target/ci-lab measure integrity-verification --input-size 50 --warmup 0 --iterations 2 > target/ci-measure.json
+          grep -q '"status": "completed"' target/ci-measure.json
+          grep -q '"evidence_level": "smoke"' target/ci-measure.json
+          cargo run -p orbit-lab --locked -- --lab target/ci-lab validate crates/orbit-lab/tests/fixtures/bundles/valid-differential.json | grep -q '"valid": true'
+          cargo run -p orbit-lab --locked -- --lab target/ci-lab validate crates/orbit-lab/tests/fixtures/bundles/truncated.json | grep -q '"code": "truncated"'
 
   web:
     name: web (lint, types, unit tests, build)

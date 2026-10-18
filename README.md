@@ -154,7 +154,7 @@ state, diffs two of them, and names the events responsible for each change.
     reproduction from the stored spec.
 - **Interfaces.**
   - an `orbit-lab` CLI;
-  - five `/api/v1/lab/*` endpoints ([docs/API.md](docs/API.md#lab-endpoints));
+  - `/api/v1/lab/*` endpoints ([docs/API.md](docs/API.md#lab-endpoints));
   - an **Experiments** page in the Observatory.
 - **Sprint 8: failure diagnosis.**
   - Every divergence interval and convergence, with entry and exit diffs,
@@ -181,6 +181,28 @@ state, diffs two of them, and names the events responsible for each change.
   - Registry migration v3; locked temporary artifact files, cleaned up only
     when their writer is gone.
   - Process crashes only: power loss is **not** simulated.
+- **Phase 9: one integrated platform.**
+  - **One experiment model** for differential replay, reliability and
+    performance. Registry v4; experiments whose creator died before
+    starting them are marked `abandoned` (creation locks). One set of
+    reproduction statuses, including `artifact_missing`, `inconclusive`
+    and `unsupported`.
+  - **Statistical performance lab** ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+    - seven workloads, with warm-up and measured iterations and seeds;
+    - every sample, plus median and mean intervals, percentiles gated by
+      sample count, and the environment;
+    - comparisons that refuse incompatible configurations and separate
+      suspected changes from Mann–Whitney-supported ones;
+    - linked re-measurement as reproduction.
+  - **Portable evidence bundles** ([docs/EVIDENCE.md](docs/EVIDENCE.md)):
+    - versioned canonical JSON with an integrity manifest and the input
+      events;
+    - strict, bounded validation;
+    - import kept apart from local experiments;
+    - exact reproduction of a differential replay from the bundle alone.
+  - **API and Observatory:** background measurements (one at a time),
+    comparison, bundle export, validation, import and reproduction; new
+    **Performance** and **Evidence** pages; grouped navigation.
 - Design and limitations are in [docs/LAB.md](docs/LAB.md) and
   [ADR 0009](docs/adr/0009-orbit-lab-crate-and-registry.md).
 
@@ -189,10 +211,14 @@ state, diffs two of them, and names the events responsible for each change.
 | Suite | Count | Runs against |
 |-------|-------|--------------|
 | `orbit-core` unit + integration + doc | 44 + 126 + 4 | real SQLite files (126 includes 9 property tests and 2 child-process entry points) |
-| `orbit-api` unit + HTTP contract + hardening + lab + TCP | 7 + 16 + 6 + 8 + 1 | the real router and engine on temporary databases |
-| `orbit-lab` unit + differential + timeline + reproduction + registry + identity + properties + CLI + doc | 3 + 16 + 10 + 7 + 11 + 7 + 3 + 2 + 1 | real event stores and registries in temporary directories; timelines checked against an independent reference; a real Sprint 7 registry fixture |
-| Web unit and component (Vitest) | 29 | the API client, components, the Overview and Experiments views, with mocked responses |
-| End-to-end (Playwright) | 3 | a real `orbit-api` + production web build + empty temporary SQLite files (event store and lab registry) |
+| `orbit-api` unit + HTTP contract + hardening + lab + evidence/performance + TCP | 7 + 16 + 6 + 10 + 6 + 1 | the real router and engine on temporary databases |
+| `orbit-lab` unit + differential + timeline + reproduction + registry + identity + properties + CLI + reliability + abandonment + performance + bundles + doc | 31 + 16 + 10 + 7 + 11 + 7 + 3 + 4 + 9 + 5 + 6 + 11 + 1 | real event stores and registries in temporary directories; timelines checked against an independent reference; real child processes; statistics against independently computed answers; a real Sprint 7 registry fixture and committed bundle fixtures |
+| Web unit and component (Vitest) | 41 | the API client, components, the Overview, Experiments, reliability, performance and evidence views, with mocked responses |
+| End-to-end (Playwright) | 5 | a real `orbit-api` + production web build + empty temporary SQLite files (event store and lab registry) |
+
+Totals at the end of Phase 9: 341 Rust tests (one more, the bundle
+fixture generator, is `#[ignore]`d), 41 web unit tests and 5 end-to-end
+tests.
 
 Criterion suites cover the event store, reconstruction, and Phase 3's
 concurrency, verification, replay and failure paths.
@@ -422,9 +448,8 @@ The lab's own limitations are listed in [docs/LAB.md](docs/LAB.md#known-limitati
 | Sprint 7 | Experiment registry, implementation identity, differential replay ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
 | Sprint 8 | Divergence timeline, failure diagnosis, identity completeness, reproduction classes ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
 | Sprint 9 | Reliability scenarios, fault injection, multi-process registry safety ([RELIABILITY.md](docs/RELIABILITY.md)) | **done** (unreleased) |
-
-Evidence bundles and the reliability and performance labs are planned in [docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md) and not
-implemented.
+| Phase 9 | Integrated experiments, abandoned-experiment recovery, statistical performance lab, evidence bundles, Observatory integration ([PERFORMANCE.md](docs/PERFORMANCE.md), [EVIDENCE.md](docs/EVIDENCE.md)) | **done** (unreleased) |
+| Phase 10 | Final audit, defect closure and release | planned |
 
 ## Release status
 
@@ -446,7 +471,8 @@ not yet have:
   machine plus GitHub's Ubuntu and macOS runners. There is no MSRV policy and
   no published crates or binaries.
 
-The on-disk format is versioned (schema v3). Databases created by every earlier
+The on-disk formats are versioned: event store schema v3, lab registry
+schema v4, evidence bundle format 1. Databases created by every earlier
 phase are upgraded in place, and tests cover that from real fixtures.
 
 ## Benchmarks: what has and has not been measured
@@ -460,6 +486,7 @@ hardware and conditions listed:
 | `event_store` (Phase 1) | yes, one recorded run |
 | `reconstruction` (Phase 2) | yes, one recorded run |
 | `crash_lab` (Phase 3) | yes, one recorded run |
+| Performance lab workloads (Phase 9) | yes, one recorded run of each, 30 samples, in [docs/PERFORMANCE.md](docs/PERFORMANCE.md#recorded-measurements-one-run) |
 | HTTP API latency or throughput | **not measured**. The API only reports per-request server timings. |
 | Web UI performance | **not measured** |
 | Any other hardware or OS | **not measured** |

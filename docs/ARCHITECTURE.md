@@ -201,7 +201,21 @@ Smaller choices:
 All five phases are complete (`v0.1.0`). The next program, a lab for
 differential replay, reliability experiments, statistical benchmarks and
 evidence bundles, is planned in [ATLAS_INTEGRATION.md](ATLAS_INTEGRATION.md).
-Sprint 7 implemented its first part, `orbit-lab` ([LAB.md](LAB.md)). Evidence
-bundles and the reliability and performance labs are not implemented. Still out of scope: a read-connection pool
+Sprints 7–9 and Phase 9 implemented it in `orbit-lab` ([LAB.md](LAB.md)):
+
+```text
+                 ┌──────────────── orbit-lab ─────────────────┐
+ orbit-core ◀────│ registry (lab.db, v4) · artifacts (sha256)  │◀── orbit-api (/lab/*) ◀── Observatory
+ (read only)     │ kinds: differential_replay · performance ·  │
+                 │        reliability (orbit-reliability only) │◀── orbit-lab / orbit-reliability CLIs
+                 │ reproduction (ReproductionStatus) · bundles │
+                 └─────────────────────────────────────────────┘
+```
+
+Differential replay is in [LAB.md](LAB.md), reliability in
+[RELIABILITY.md](RELIABILITY.md), performance in
+[PERFORMANCE.md](PERFORMANCE.md) and evidence bundles in
+[EVIDENCE.md](EVIDENCE.md). `orbit-core` was not changed for any of them.
+Still out of scope: a read-connection pool
 behind `EventStore` (only if multi-user API load ever matters), and OS-crash
 and power-loss testing, which would need a VM-level harness.
