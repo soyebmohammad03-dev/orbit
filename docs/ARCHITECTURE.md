@@ -189,9 +189,11 @@ Smaller choices:
   `read_after`, `event` and `head` methods. Phase 2 only added snapshot
   methods to `EventStore`, plus migration 2.
 
-## Extension points for later phases
+## Extension points for later work
 
-- **Phase 5 (release hardening).** Versioned release artifacts, broader
-  end-to-end coverage, and possibly a read-connection pool behind
-  `EventStore` if multi-user API load ever matters. OS-crash and power-loss
-  testing would need a VM-level harness and is out of scope so far.
+All five phases are complete (`v0.1.0`). The proposed next program, a lab for
+differential replay, reliability experiments, statistical benchmarks and
+evidence bundles, is planned in [ATLAS_INTEGRATION.md](ATLAS_INTEGRATION.md).
+None of it is implemented yet. Still out of scope: a read-connection pool
+behind `EventStore` (only if multi-user API load ever matters), and OS-crash
+and power-loss testing, which would need a VM-level harness.

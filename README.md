@@ -352,6 +352,9 @@ their hardware and conditions.
 | 4 | Backend API (Axum) and web observability frontend | **done** |
 | 5 | Verification, hardening, documentation, release | **done** (`v0.1.0`) |
 
+The proposed next program (Sprint 7 onward, not yet implemented) is in
+[docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md).
+
 ## Release status
 
 `v0.1.0` is a **pre-1.0 release**. It is verified from a clean checkout of the
