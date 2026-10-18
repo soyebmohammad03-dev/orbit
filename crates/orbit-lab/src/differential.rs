@@ -1,5 +1,15 @@
 //! Differential replay: two implementations, one ordered history.
 //!
+//! # Boundaries
+//!
+//! A *boundary* is a position between events. Boundary `b` is the state
+//! **after** applying events `1..=b`; boundary 0 is the initial state, before
+//! any event. "The states diverge at boundary `b`" therefore means that
+//! applying event `b` produced different states, given states that were
+//! equal at `b - 1` (or, at the first compared boundary, unknown).
+//! "Converged at boundary `c`" means the states differed at `c - 1` and are
+//! equal again after event `c`.
+//!
 //! # Algorithm
 //!
 //! 1. **Resolve the input.** Read the stream head, resolve `to`, check
@@ -13,13 +23,16 @@
 //!    `&StoredEvent` value is passed to the left and then the right
 //!    implementation, so both receive identical ordered input. A digest over
 //!    the ordered event digests fed (`events_fed_digest`) records it.
-//! 3. **Compare at every boundary.** Boundary `b` is the state after event
-//!    `b` (0 is the initial state). For `from <= b <= to`, each state is
+//! 3. **Compare at every boundary** `from <= b <= to`: each state is
 //!    serialized with `serde_json` and compared by
-//!    `orbit_core::replay::state_digest`, i.e. by canonical
-//!    JSON. At the first differing boundary the lab records both state
-//!    summaries and the structural diff (`orbit_core::diff::diff`, left →
-//!    right). Every maximal run of differing boundaries is a *segment*.
+//!    `orbit_core::replay::state_digest`, i.e. by canonical JSON. Both
+//!    digests are appended to the trace artifacts. Every maximal run of
+//!    differing boundaries is a [`DivergenceInterval`]; the result lists
+//!    each one with how it ended (converged, still open at `to`, or stopped
+//!    by a failure). The first [`MAX_DIAGNOSED_INTERVALS`] intervals carry a
+//!    structural diff (`orbit_core::diff::diff`, left → right) at their first
+//!    and last boundary. Full states are kept only for the current and, while
+//!    a diagnosed interval is open, the latest differing boundary.
 //! 4. **Stop at the first failure.** If either implementation rejects an
 //!    event, panics or produces an unencodable state, both stop there and
 //!    the failure is the result (`implementation_failed`).
@@ -33,17 +46,23 @@
 //! Without a `reference` side the result describes a *difference between
 //! implementations*; neither side is called wrong. With a reference, that
 //! side's state is the *expected* state and the other is *observed*.
-//! Structural changes always describe how the right state differs from the
-//! left one.
+//! Structural changes always read left → right: `from` is the left value,
+//! `to` the right value ([`Perspective`]).
+//!
+//! # Evidence and hypotheses
+//!
+//! [`Diagnosis::evidence`] lists only facts read from the comparison.
+//! [`Diagnosis::not_established`] lists what those facts do not show. The lab
+//! never states a cause.
 
 use std::ops::ControlFlow;
 
-use orbit_core::diff::{Change, diff};
+use orbit_core::diff::{Change, ChangeKind, diff};
 use orbit_core::domain::canonical::to_canonical_string;
 use orbit_core::replay::state_digest;
 use orbit_core::{
     Digest, EventId, EventStore, EventType, SchemaVersion, Sequence, StoreError, StoredEvent,
-    StreamId,
+    StreamId, Timestamp,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -54,12 +73,22 @@ use crate::identity::Determinism;
 use crate::registry::{Failure, FailureKind, InputRange};
 use crate::spec::{DifferentialSpec, MAX_EVENTS, Side};
 
+/// Layout version of [`DifferentialResult`]. Sprint 7 results (without this
+/// field) are version 1.
+pub const RESULT_VERSION: u32 = 2;
+/// Version of the comparison rules ([`Semantics`]). Unchanged since Sprint 7,
+/// whose results (without the field) used the same rules.
+pub const SEMANTICS_VERSION: u32 = 1;
 /// Events read from the store per page.
 pub const PAGE_SIZE: usize = 1_000;
 /// Structural changes recorded per comparison; the total is always reported.
 pub const MAX_RECORDED_CHANGES: usize = 200;
-/// Divergent segments recorded; the total is always reported.
-pub const MAX_RECORDED_SEGMENTS: usize = 100;
+/// Divergence intervals listed in a result; the total is always reported.
+pub const MAX_RECORDED_INTERVALS: usize = 1_000;
+/// Divergence intervals that carry structural diffs at their first and last
+/// boundary. Later intervals are listed with boundaries only; their digests
+/// remain in the trace artifacts.
+pub const MAX_DIAGNOSED_INTERVALS: usize = 20;
 
 /// Outcome of a differential replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -92,6 +121,73 @@ impl Outcome {
     }
 }
 
+/// The comparison rules a result was produced under. Reproduction refuses
+/// to compare results produced under different rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Semantics {
+    /// [`SEMANTICS_VERSION`].
+    pub version: u32,
+    /// What a boundary is.
+    pub boundary: &'static str,
+    /// How states are compared.
+    pub state_comparison: &'static str,
+    /// How structural differences are computed.
+    pub structural_diff: &'static str,
+    /// Largest supported `to`.
+    pub max_events: u64,
+    /// [`MAX_RECORDED_CHANGES`].
+    pub max_recorded_changes: usize,
+    /// [`MAX_RECORDED_INTERVALS`].
+    pub max_recorded_intervals: usize,
+    /// [`MAX_DIAGNOSED_INTERVALS`].
+    pub max_diagnosed_intervals: usize,
+}
+
+impl Semantics {
+    /// The rules of this build.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            version: SEMANTICS_VERSION,
+            boundary: "boundary b is the state after applying events 1..=b; boundary 0 is the initial state",
+            state_comparison: "equal iff ORBIT-STATE-DIGEST-V1 digests of the canonical JSON of the serde_json encodings are equal",
+            structural_diff: "orbit_core::diff::diff from the left to the right state; JSON Pointer paths; arrays compared by index",
+            max_events: MAX_EVENTS,
+            max_recorded_changes: MAX_RECORDED_CHANGES,
+            max_recorded_intervals: MAX_RECORDED_INTERVALS,
+            max_diagnosed_intervals: MAX_DIAGNOSED_INTERVALS,
+        }
+    }
+}
+
+/// Which side, if any, is the expected behaviour, and how to read diffs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Perspective {
+    /// The reference side, if one was designated.
+    pub reference: Option<Side>,
+    /// The expected side (the reference), if any.
+    pub expected: Option<Side>,
+    /// The observed side (the other one), if a reference was designated.
+    pub observed: Option<Side>,
+    /// Always `"left_to_right"`: a change's `from` is the left value and
+    /// `to` the right value.
+    pub changes_orientation: &'static str,
+}
+
+impl Perspective {
+    fn new(reference: Option<Side>) -> Self {
+        Self {
+            reference,
+            expected: reference,
+            observed: reference.map(|s| match s {
+                Side::Left => Side::Right,
+                Side::Right => Side::Left,
+            }),
+            changes_orientation: "left_to_right",
+        }
+    }
+}
+
 /// Size and digest of one state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StateSummary {
@@ -110,7 +206,8 @@ impl StateSummary {
     }
 }
 
-/// The event that produced a boundary.
+/// The event that produced a boundary. Metadata *values* are not copied
+/// into results (they may be sensitive); only their keys are listed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EventRef {
     /// Sequence.
@@ -121,16 +218,71 @@ pub struct EventRef {
     pub event_type: EventType,
     /// Payload schema version.
     pub schema_version: SchemaVersion,
+    /// The event's digest (it chains to every earlier event).
+    pub digest: Digest,
+    /// When it was recorded (informational).
+    pub recorded_at: Timestamp,
+    /// Metadata keys, sorted.
+    pub metadata_keys: Vec<String>,
 }
 
 impl From<&StoredEvent> for EventRef {
     fn from(e: &StoredEvent) -> Self {
+        let mut metadata_keys: Vec<String> = e.metadata.keys().cloned().collect();
+        metadata_keys.sort();
         Self {
             sequence: e.sequence,
             event_id: e.event_id,
             event_type: e.event_type.clone(),
             schema_version: e.schema_version,
+            digest: e.digest,
+            recorded_at: e.recorded_at,
+            metadata_keys,
         }
+    }
+}
+
+/// Counts of structural changes by kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ChangeSummary {
+    /// Paths present only in the right state.
+    pub added: u64,
+    /// Paths present only in the left state.
+    pub removed: u64,
+    /// Paths present in both with different values.
+    pub modified: u64,
+    /// Of the modified paths, those whose JSON type differs (for example a
+    /// number on one side and a string or `null` on the other).
+    pub type_changed: u64,
+}
+
+fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+impl ChangeSummary {
+    fn of(changes: &[Change]) -> Self {
+        let mut s = Self::default();
+        for change in changes {
+            match &change.kind {
+                ChangeKind::Added { .. } => s.added += 1,
+                ChangeKind::Removed { .. } => s.removed += 1,
+                ChangeKind::Modified { from, to } => {
+                    s.modified += 1;
+                    if json_type(from) != json_type(to) {
+                        s.type_changed += 1;
+                    }
+                }
+            }
+        }
+        s
     }
 }
 
@@ -152,6 +304,8 @@ pub struct Comparison {
     pub changes: Vec<Change>,
     /// Number of changes in total.
     pub changes_total: u64,
+    /// Counts of all changes (not only the recorded ones) by kind.
+    pub change_summary: ChangeSummary,
 }
 
 impl Comparison {
@@ -161,6 +315,7 @@ impl Comparison {
         let equal = l.digest == r.digest;
         let mut changes = if equal { Vec::new() } else { diff(left, right) };
         let changes_total = changes.len() as u64;
+        let change_summary = ChangeSummary::of(&changes);
         changes.truncate(MAX_RECORDED_CHANGES);
         Self {
             boundary,
@@ -170,6 +325,7 @@ impl Comparison {
             equal,
             changes,
             changes_total,
+            change_summary,
         }
     }
 }
@@ -184,13 +340,68 @@ pub struct Divergence {
     pub boundaries_matched_before: u64,
 }
 
-/// A maximal run of consecutive differing boundaries.
+/// How a divergence interval ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct Segment {
+#[serde(rename_all = "snake_case")]
+pub enum IntervalEnd {
+    /// The states became equal again at `converged_at`.
+    Converged,
+    /// The states still differed at the last boundary, `to`.
+    OpenAtEnd,
+    /// An implementation failed while the states differed.
+    StoppedByFailure,
+}
+
+/// A maximal run of consecutive boundaries at which the states differ.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DivergenceInterval {
+    /// 1-based position among all intervals.
+    pub index: u64,
     /// First differing boundary.
     pub first: u64,
     /// Last differing boundary.
     pub last: u64,
+    /// Number of differing boundaries (`last - first + 1`).
+    pub boundaries: u64,
+    /// How it ended.
+    pub end: IntervalEnd,
+    /// Boundary at which the states became equal again (`last + 1`).
+    pub converged_at: Option<u64>,
+    /// The event that made them equal again.
+    pub convergence_event: Option<EventRef>,
+    /// Comparison at `first` (for the first [`MAX_DIAGNOSED_INTERVALS`] intervals).
+    pub entry: Option<Comparison>,
+    /// Comparison at `last` when it differs from `first` (diagnosed intervals only).
+    pub exit: Option<Comparison>,
+}
+
+/// The complete divergence history.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Timeline {
+    /// First compared boundary (`from`).
+    pub first_boundary: u64,
+    /// Last compared boundary (`to`, or earlier if an implementation failed);
+    /// `None` if nothing was compared.
+    pub last_boundary: Option<u64>,
+    /// Divergence intervals in order (at most [`MAX_RECORDED_INTERVALS`]).
+    pub intervals: Vec<DivergenceInterval>,
+    /// Number of intervals in total.
+    pub intervals_total: u64,
+    /// Whether `intervals` is shorter than `intervals_total`.
+    pub intervals_truncated: bool,
+    /// Number of intervals that ended by converging.
+    pub convergences: u64,
+    /// Whether the states are equal at `last_boundary`.
+    pub final_equal: Option<bool>,
+}
+
+/// Facts read from the comparison, and what they do not show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Diagnosis {
+    /// Observed facts.
+    pub evidence: Vec<String>,
+    /// Questions the evidence does not answer.
+    pub not_established: Vec<String>,
 }
 
 /// An implementation failure.
@@ -276,15 +487,21 @@ pub struct SideIdentity {
     pub fingerprint: Digest,
 }
 
-/// The result of a differential replay. Contains no timings, ids or
-/// timestamps, so executing the same experiment on the same input yields
-/// the same document (and the same digest).
+/// The result of a differential replay. Contains no timings, ids, build
+/// details or timestamps of the run, so executing the same experiment on the
+/// same input yields the same document (and the same digest).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DifferentialResult {
+    /// [`RESULT_VERSION`].
+    pub result_version: u32,
+    /// The comparison rules.
+    pub semantics: Semantics,
     /// Outcome.
     pub outcome: Outcome,
     /// Reference side, if any (its state is the expected one).
     pub reference: Option<Side>,
+    /// How to read sides and diffs.
+    pub perspective: Perspective,
     /// Left implementation.
     pub left: SideIdentity,
     /// Right implementation.
@@ -301,11 +518,9 @@ pub struct DifferentialResult {
     pub boundaries_differing: u64,
     /// First differing boundary.
     pub first_divergence: Option<Divergence>,
-    /// Runs of differing boundaries (at most [`MAX_RECORDED_SEGMENTS`]).
-    pub divergent_segments: Vec<Segment>,
-    /// Number of segments in total.
-    pub divergent_segments_total: u64,
-    /// Comparison at `to`, when both implementations got there.
+    /// Every divergence interval and convergence.
+    pub timeline: Timeline,
+    /// Comparison at the last compared boundary, when neither side failed.
     pub final_comparison: Option<Comparison>,
     /// Implementation failures.
     pub failures: Vec<SideFailure>,
@@ -313,6 +528,8 @@ pub struct DifferentialResult {
     pub determinism: DeterminismReport,
     /// Reproducibility.
     pub reproducibility: Reproducibility,
+    /// Evidence and open questions.
+    pub diagnosis: Diagnosis,
 }
 
 /// A computed result plus the artifacts to store with it.
@@ -574,6 +791,287 @@ fn trace_bytes(trace: &[Digest]) -> Vec<u8> {
     trace.iter().flat_map(|d| *d.as_bytes()).collect()
 }
 
+/// An interval while it is still open.
+struct OpenInterval {
+    index: u64,
+    first: u64,
+    last: u64,
+    recorded: bool,
+    diagnosed: bool,
+    entry: Option<Comparison>,
+    /// Latest differing boundary after `first`, with both states, while diagnosed.
+    pending_exit: Option<(u64, Option<EventRef>, Value, Value)>,
+}
+
+impl OpenInterval {
+    fn close(
+        self,
+        end: IntervalEnd,
+        converged_at: Option<u64>,
+        convergence_event: Option<EventRef>,
+    ) -> DivergenceInterval {
+        DivergenceInterval {
+            index: self.index,
+            first: self.first,
+            last: self.last,
+            boundaries: self.last - self.first + 1,
+            end,
+            converged_at,
+            convergence_event,
+            entry: self.entry,
+            exit: self
+                .pending_exit
+                .map(|(b, event, l, r)| Comparison::new(b, event, &l, &r)),
+        }
+    }
+}
+
+/// Builds the timeline as boundaries are observed.
+struct TimelineBuilder {
+    first_boundary: u64,
+    last_boundary: Option<u64>,
+    compared: u64,
+    differing: u64,
+    intervals: Vec<DivergenceInterval>,
+    intervals_total: u64,
+    convergences: u64,
+    open: Option<OpenInterval>,
+    first: Option<Divergence>,
+    first_states: Option<Value>,
+    final_equal: Option<bool>,
+}
+
+impl TimelineBuilder {
+    fn new(first_boundary: u64) -> Self {
+        Self {
+            first_boundary,
+            last_boundary: None,
+            compared: 0,
+            differing: 0,
+            intervals: Vec::new(),
+            intervals_total: 0,
+            convergences: 0,
+            open: None,
+            first: None,
+            first_states: None,
+            final_equal: None,
+        }
+    }
+
+    fn push(
+        &mut self,
+        interval: OpenInterval,
+        end: IntervalEnd,
+        at: Option<u64>,
+        event: Option<EventRef>,
+    ) {
+        if interval.recorded {
+            self.intervals.push(interval.close(end, at, event));
+        }
+    }
+
+    /// Records the comparison of `left` and `right` at boundary `b`.
+    fn observe(
+        &mut self,
+        b: u64,
+        event: Option<&StoredEvent>,
+        equal: bool,
+        left: &Value,
+        right: &Value,
+    ) {
+        self.compared += 1;
+        self.last_boundary = Some(b);
+        self.final_equal = Some(equal);
+        if equal {
+            if let Some(open) = self.open.take() {
+                self.convergences += 1;
+                self.push(
+                    open,
+                    IntervalEnd::Converged,
+                    Some(b),
+                    event.map(EventRef::from),
+                );
+            }
+            return;
+        }
+        self.differing += 1;
+        if self.first.is_none() {
+            self.first = Some(Divergence {
+                comparison: Comparison::new(b, event.map(EventRef::from), left, right),
+                boundaries_matched_before: self.compared - 1,
+            });
+            self.first_states = Some(json!({ "left": left, "right": right }));
+        }
+        match self.open.as_mut() {
+            Some(open) => {
+                open.last = b;
+                if open.diagnosed {
+                    open.pending_exit =
+                        Some((b, event.map(EventRef::from), left.clone(), right.clone()));
+                }
+            }
+            None => {
+                self.intervals_total += 1;
+                let index = self.intervals_total;
+                let diagnosed = index <= MAX_DIAGNOSED_INTERVALS as u64;
+                let entry = if index == 1 {
+                    self.first.as_ref().map(|d| d.comparison.clone())
+                } else if diagnosed {
+                    Some(Comparison::new(b, event.map(EventRef::from), left, right))
+                } else {
+                    None
+                };
+                self.open = Some(OpenInterval {
+                    index,
+                    first: b,
+                    last: b,
+                    recorded: self.intervals.len() < MAX_RECORDED_INTERVALS,
+                    diagnosed,
+                    entry,
+                    pending_exit: None,
+                });
+            }
+        }
+    }
+
+    fn finish(mut self, failed: bool) -> (Timeline, Option<Divergence>, Option<Value>, u64, u64) {
+        if let Some(open) = self.open.take() {
+            let end = if failed {
+                IntervalEnd::StoppedByFailure
+            } else {
+                IntervalEnd::OpenAtEnd
+            };
+            self.push(open, end, None, None);
+        }
+        let timeline = Timeline {
+            first_boundary: self.first_boundary,
+            last_boundary: self.last_boundary,
+            intervals_truncated: (self.intervals.len() as u64) < self.intervals_total,
+            intervals: self.intervals,
+            intervals_total: self.intervals_total,
+            convergences: self.convergences,
+            final_equal: self.final_equal,
+        };
+        (
+            timeline,
+            self.first,
+            self.first_states,
+            self.compared,
+            self.differing,
+        )
+    }
+}
+
+fn plural(n: u64, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else if let Some(stem) = word.strip_suffix("ary") {
+        format!("{n} {stem}aries")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+fn describe_event(e: &EventRef) -> String {
+    format!(
+        "event #{} ({}, schema v{})",
+        e.sequence, e.event_type, e.schema_version
+    )
+}
+
+fn diagnose(
+    timeline: &Timeline,
+    first: Option<&Divergence>,
+    failures: &[SideFailure],
+    compared: u64,
+    differing: u64,
+    reference: Option<Side>,
+) -> Diagnosis {
+    let mut evidence = Vec::new();
+    let mut not_established = Vec::new();
+    match first {
+        None if compared > 0 => evidence.push(format!(
+            "The states were equal at all {} compared (boundaries {}–{}).",
+            plural(compared, "boundary"),
+            timeline.first_boundary,
+            timeline.last_boundary.unwrap_or(timeline.first_boundary)
+        )),
+        None => evidence.push("No boundary was compared.".to_owned()),
+        Some(d) => {
+            let c = &d.comparison;
+            let at = match &c.event {
+                None => "in the initial states (boundary 0), before any event".to_owned(),
+                Some(e) => format!("at boundary {}, after {}", c.boundary, describe_event(e)),
+            };
+            if d.boundaries_matched_before == 0 {
+                evidence.push(format!(
+                    "The states already differ at the first compared boundary, {at}."
+                ));
+            } else {
+                evidence.push(format!(
+                    "The states were equal at {} and first differ {at}.",
+                    plural(d.boundaries_matched_before, "compared boundary")
+                ));
+            }
+            let s = c.change_summary;
+            evidence.push(format!(
+                "There, {} {}: {} only in the right state, {} only in the left state, {} in both with different values ({} with a different JSON type).",
+                plural(c.changes_total, "JSON path"),
+                if c.changes_total == 1 { "differs" } else { "differ" },
+                s.added,
+                s.removed,
+                s.modified,
+                s.type_changed
+            ));
+            evidence.push(format!(
+                "In total, {} of {} differ, in {}; the states became equal again {}.",
+                plural(differing, "boundary"),
+                compared,
+                plural(timeline.intervals_total, "divergence interval"),
+                plural(timeline.convergences, "time")
+            ));
+        }
+    }
+    match timeline.final_equal {
+        Some(true) if first.is_some() && failures.is_empty() => {
+            evidence.push("At the last compared boundary the states are equal.".to_owned());
+        }
+        Some(false) if failures.is_empty() => {
+            evidence.push("At the last compared boundary the states differ.".to_owned());
+        }
+        _ => {}
+    }
+    for f in failures {
+        evidence.push(format!(
+            "The {} implementation ({}) failed at boundary {}.",
+            f.side.as_str(),
+            f.implementation,
+            f.boundary
+        ));
+    }
+    if let Some(d) = first {
+        not_established.push(
+            "Why the states differ. The first differing boundary is where a difference first becomes visible in the serialized states, not necessarily where it was caused.".to_owned(),
+        );
+        if d.comparison.boundary > 0 {
+            not_established.push(
+                "Whether the cause is in how either implementation handles this event, or in earlier internal state that the serialized states do not expose.".to_owned(),
+            );
+        }
+        not_established.push(match reference {
+            None => "Which implementation, if either, is correct: no reference side was designated.".to_owned(),
+            Some(side) => format!(
+                "Whether the {} implementation is correct: it was designated as the reference, and the lab does not check that.",
+                side.as_str()
+            ),
+        });
+    }
+    Diagnosis {
+        evidence,
+        not_established,
+    }
+}
+
 /// Executes a differential replay over an already resolved input.
 ///
 /// # Errors
@@ -591,17 +1089,10 @@ pub fn execute(
     ];
     let mut events_hasher = TaggedHasher::new(EVENTS_TAG);
     let mut events_processed = 0u64;
-    let mut compared = 0u64;
-    let mut differing = 0u64;
-    let mut first: Option<Divergence> = None;
-    let mut first_states: Option<Value> = None;
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut segments_total = 0u64;
-    let mut in_segment = false;
-    let mut recording_segment = false;
-    let mut final_event: Option<EventRef> = None;
+    let mut timeline = TimelineBuilder::new(input.from);
     let mut last_observed: Option<u64> = None;
     let mut last_states: Option<(Value, Value)> = None;
+    let mut final_event: Option<EventRef> = None;
 
     let mut observe = |lanes: &mut [Lane<'_>; 2], b: u64, event: Option<&StoredEvent>| -> bool {
         let l = lanes[0].state(b, event);
@@ -611,34 +1102,10 @@ pub fn execute(
         };
         last_observed = Some(b);
         if b >= input.from {
-            lanes[0].trace.push(state_digest(&l));
-            lanes[1].trace.push(state_digest(&r));
-            compared += 1;
-            let equal = lanes[0].trace.last() == lanes[1].trace.last();
-            if equal {
-                in_segment = false;
-            } else {
-                differing += 1;
-                if first.is_none() {
-                    first = Some(Divergence {
-                        comparison: Comparison::new(b, event.map(EventRef::from), &l, &r),
-                        boundaries_matched_before: compared - 1,
-                    });
-                    first_states = Some(json!({ "left": l, "right": r }));
-                }
-                if in_segment {
-                    if recording_segment && let Some(s) = segments.last_mut() {
-                        s.last = b;
-                    }
-                } else {
-                    in_segment = true;
-                    segments_total += 1;
-                    recording_segment = segments.len() < MAX_RECORDED_SEGMENTS;
-                    if recording_segment {
-                        segments.push(Segment { first: b, last: b });
-                    }
-                }
-            }
+            let (dl, dr) = (state_digest(&l), state_digest(&r));
+            lanes[0].trace.push(dl);
+            lanes[1].trace.push(dr);
+            timeline.observe(b, event, dl == dr, &l, &r);
         }
         last_states = Some((l, r));
         final_event = event.map(EventRef::from);
@@ -667,6 +1134,8 @@ pub fn execute(
     }
 
     let failures: Vec<SideFailure> = lanes.iter().filter_map(|l| l.failure.clone()).collect();
+    let (timeline, first, first_states, compared, differing) =
+        timeline.finish(!failures.is_empty());
     let final_comparison = match (&last_states, failures.is_empty()) {
         (Some((l, r)), true) => Some(Comparison::new(input.to, final_event, l, r)),
         _ => None,
@@ -689,10 +1158,9 @@ pub fn execute(
                     .zip(&lane.trace)
                     .position(|(a, b)| a != b)
                     .unwrap_or_else(|| trace.len().min(lane.trace.len()));
-                let boundary = input.from + index as u64;
                 inconsistency = Some(Inconsistency {
                     side: lane.side,
-                    boundary,
+                    boundary: input.from + index as u64,
                 });
                 break;
             }
@@ -777,9 +1245,20 @@ pub fn execute(
         ));
     }
 
+    let diagnosis = diagnose(
+        &timeline,
+        first.as_ref(),
+        &failures,
+        compared,
+        differing,
+        spec.reference,
+    );
     let result = DifferentialResult {
+        result_version: RESULT_VERSION,
+        semantics: Semantics::current(),
         outcome,
         reference: spec.reference,
+        perspective: Perspective::new(spec.reference),
         left: identity(&lanes[0]),
         right: identity(&lanes[1]),
         input: input.clone(),
@@ -788,12 +1267,12 @@ pub fn execute(
         boundaries_compared: compared,
         boundaries_differing: differing,
         first_divergence: first,
-        divergent_segments: segments,
-        divergent_segments_total: segments_total,
+        timeline,
         final_comparison,
         failures,
         determinism,
         reproducibility: Reproducibility { status, reasons },
+        diagnosis,
     };
     Ok(DifferentialRun { result, artifacts })
 }

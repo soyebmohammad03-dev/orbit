@@ -12,6 +12,7 @@
 //!   show ID                           one experiment, as JSON
 //!   verify ID                         check stored digests and artifacts
 //!   reproduce ID                      execute again and compare
+//!   trace ID [--from N] [--limit N]   per-boundary state digests
 //! ```
 //!
 //! `--db` defaults to `$ORBIT_DB_PATH` or `data/orbit.db`; `--lab` to
@@ -29,7 +30,8 @@ const USAGE: &str = "usage: orbit-lab [--db PATH] [--lab DIR] <implementations|r
   run --stream S --left ID --right ID [--from N] [--to N] [--reference left|right] [--no-determinism-check]
   run --spec FILE.json
   list [--limit N]
-  show ID | verify ID | reproduce ID";
+  show ID | verify ID | reproduce ID
+  trace ID [--from N] [--limit N]";
 
 struct Args {
     db: PathBuf,
@@ -163,6 +165,13 @@ fn main_inner() -> Result<Value, String> {
             let id = experiment_id(&args.rest)?;
             let store = open_store(&args)?;
             json(&lab.reproduce(id, &store).map_err(|e| e.to_string())?)?
+        }
+        "trace" => {
+            let id = experiment_id(&args.rest)?;
+            let limit = number(&args.rest, "--limit")?.unwrap_or(100);
+            let limit = usize::try_from(limit).map_err(|_| "--limit is too large")?;
+            let from = number(&args.rest, "--from")?;
+            json(&lab.trace(id, from, limit).map_err(|e| e.to_string())?)?
         }
         other => return Err(format!("unknown command {other:?}\n{USAGE}")),
     })

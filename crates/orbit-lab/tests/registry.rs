@@ -32,7 +32,7 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
     let app: i64 = raw
         .query_row("PRAGMA application_id", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((version, app), (1, orbit_lab::registry::APPLICATION_ID));
+    assert_eq!((version, app), (2, orbit_lab::registry::APPLICATION_ID));
     let mut tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
         .unwrap()
@@ -67,7 +67,7 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
         Registry::open(&path),
         Err(LabError::UnsupportedSchemaVersion {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
 

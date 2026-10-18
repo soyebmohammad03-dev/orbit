@@ -48,7 +48,10 @@ pub mod variants;
 pub use catalog::{Catalog, Implementation, ProjectionImplementation, StepFailure, Stepper};
 pub use differential::{DifferentialResult, Outcome};
 pub use error::{LabError, Result};
-pub use identity::{BuildInfo, Determinism, ImplementationDescriptor, ImplementationId};
-pub use lab::{ArtifactVerification, Lab};
+pub use identity::{
+    BuildInfo, Determinism, IdentityAssessment, IdentityCompleteness, ImplementationDescriptor,
+    ImplementationId,
+};
+pub use lab::{ArtifactVerification, Lab, TraceEntry, TracePage};
 pub use registry::{ExperimentId, ExperimentRecord, ExperimentSummary, Status};
 pub use spec::{DifferentialSpec, Side};

@@ -291,3 +291,174 @@ pub fn test_catalog() -> Catalog {
     }
     catalog
 }
+
+/// `merge-patch@1` that keeps `null` members instead of deleting them
+/// (unlike RFC 7386). Differs from `orbit.merge-patch` exactly where a patch
+/// sets a member to `null`.
+#[derive(Debug, Clone, Copy)]
+pub struct KeepNulls;
+
+fn merge_keep_nulls(target: &mut Value, patch: &Value) {
+    match patch {
+        Value::Object(members) => {
+            if !target.is_object() {
+                *target = Value::Object(serde_json::Map::new());
+            }
+            let map = target.as_object_mut().expect("object");
+            for (key, value) in members {
+                merge_keep_nulls(map.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+        other => *target = other.clone(),
+    }
+}
+
+impl Projection for KeepNulls {
+    type State = Value;
+    fn key(&self) -> ProjectionKey {
+        ProjectionKey::new("merge-patch", 1).expect("key")
+    }
+    fn initial_state(&self) -> Value {
+        json!({})
+    }
+    fn apply(&self, mut state: Value, event: &StoredEvent) -> Result<Value, ProjectionError> {
+        merge_keep_nulls(&mut state, &event.payload);
+        Ok(state)
+    }
+}
+
+/// `counter@1` whose increments add 1000 while [`SWITCH`] is on. Declared
+/// pure, which it is within one run; used to make a re-execution differ.
+#[derive(Debug, Clone, Copy)]
+pub struct Switchable;
+
+pub static SWITCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl Projection for Switchable {
+    type State = CounterState;
+    fn key(&self) -> ProjectionKey {
+        Counter.key()
+    }
+    fn initial_state(&self) -> CounterState {
+        CounterState::default()
+    }
+    fn apply(
+        &self,
+        state: CounterState,
+        event: &StoredEvent,
+    ) -> Result<CounterState, ProjectionError> {
+        let next = Counter.apply(state, event)?;
+        if SWITCH.load(Ordering::SeqCst) && event.event_type.as_str() == "counter.incremented" {
+            return Ok(CounterState {
+                value: next.value + 1000,
+            });
+        }
+        Ok(next)
+    }
+}
+
+/// `counter@1` capped at 10 on increments.
+#[derive(Debug, Clone, Copy)]
+pub struct CappedAtTen;
+
+impl Projection for CappedAtTen {
+    type State = CounterState;
+    fn key(&self) -> ProjectionKey {
+        Counter.key()
+    }
+    fn initial_state(&self) -> CounterState {
+        CounterState::default()
+    }
+    fn apply(
+        &self,
+        state: CounterState,
+        event: &StoredEvent,
+    ) -> Result<CounterState, ProjectionError> {
+        let next = Counter.apply(state, event)?;
+        Ok(CounterState {
+            value: next.value.min(10),
+        })
+    }
+}
+
+/// The test catalog plus the Sprint 8 test implementations.
+pub fn sprint8_catalog() -> Catalog {
+    let mut catalog = test_catalog();
+    let entries: Vec<Arc<dyn orbit_lab::Implementation>> = vec![
+        Arc::new(
+            ProjectionImplementation::new(
+                "test.keep-nulls",
+                "Merge patch",
+                KeepNulls,
+                Determinism::Pure,
+            )
+            .unwrap(),
+        ),
+        Arc::new(
+            ProjectionImplementation::new(
+                "test.switchable",
+                "Counter",
+                Switchable,
+                Determinism::Pure,
+            )
+            .unwrap(),
+        ),
+        Arc::new(
+            ProjectionImplementation::new(
+                "test.capped-at-ten",
+                "Counter",
+                CappedAtTen,
+                Determinism::Pure,
+            )
+            .unwrap(),
+        ),
+    ];
+    for entry in entries {
+        catalog.register(entry).unwrap();
+    }
+    catalog
+}
+
+/// Independent reference: the state after every event (index = boundary),
+/// computed by folding the projection directly and encoding with serde_json,
+/// stopping at the first error.
+pub fn reference_states<P: Projection>(p: &P, events: &[StoredEvent]) -> Vec<Value> {
+    let mut state = p.initial_state();
+    let mut out = vec![serde_json::to_value(&state).unwrap()];
+    for event in events {
+        match p.apply(state, event) {
+            Ok(next) => state = next,
+            Err(_) => break,
+        }
+        out.push(serde_json::to_value(&state).unwrap());
+    }
+    out
+}
+
+/// Independent reference: maximal runs of differing boundaries in
+/// `from..`, as `(first, last, converged_at)`, compared with `Value` equality.
+pub fn reference_intervals(
+    left: &[Value],
+    right: &[Value],
+    from: usize,
+) -> Vec<(u64, u64, Option<u64>)> {
+    let n = left.len().min(right.len());
+    let mut out = Vec::new();
+    let mut open: Option<(u64, u64)> = None;
+    for b in from..n {
+        if left[b] == right[b] {
+            if let Some((first, last)) = open.take() {
+                out.push((first, last, Some(b as u64)));
+            }
+        } else {
+            open = Some(match open {
+                Some((first, _)) => (first, b as u64),
+                None => (b as u64, b as u64),
+            });
+        }
+    }
+    if let Some((first, last)) = open {
+        out.push((first, last, None));
+    }
+    out
+}

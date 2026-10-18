@@ -8,6 +8,23 @@ use orbit_core::{Target, projection::examples::Counter};
 use orbit_lab::{DifferentialSpec, Status};
 use serde_json::{Value, json};
 
+/// `(first, last, end, converged_at)` of every recorded interval.
+fn intervals(r: &Value) -> Vec<(u64, u64, &str, Option<u64>)> {
+    r["timeline"]["intervals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["first"].as_u64().unwrap(),
+                i["last"].as_u64().unwrap(),
+                i["end"].as_str().unwrap(),
+                i["converged_at"].as_u64(),
+            )
+        })
+        .collect()
+}
+
 fn result(record: &orbit_lab::ExperimentRecord) -> &Value {
     assert_eq!(
         record.status,
@@ -87,7 +104,7 @@ fn first_divergence_is_located_with_a_structural_diff() {
         r["final_comparison"]["changes"],
         json!([{ "path": "/value", "op": "modified", "from": 4, "to": 5 }])
     );
-    assert_eq!(r["divergent_segments"], json!([{ "first": 3, "last": 4 }]));
+    assert_eq!(intervals(r), [(3, 4, "open_at_end", None)]);
     // Same declared projection key, distinct identities.
     assert_ne!(r["left"]["fingerprint"], r["right"]["fingerprint"]);
 }
@@ -120,10 +137,12 @@ fn reconvergence_and_multiple_segments_are_distinguished() {
     assert_eq!(reconverged.outcome.as_deref(), Some("reconverged"));
     assert_eq!(r["first_divergence"]["boundary"], 2);
     assert_eq!(
-        r["divergent_segments"],
-        json!([{ "first": 2, "last": 2 }, { "first": 5, "last": 5 }])
+        intervals(r),
+        [(2, 2, "converged", Some(3)), (5, 5, "converged", Some(6))]
     );
-    assert_eq!(r["divergent_segments_total"], 2);
+    assert_eq!(r["timeline"]["intervals_total"], 2);
+    assert_eq!(r["timeline"]["convergences"], 2);
+    assert_eq!(r["timeline"]["final_equal"], true);
     assert_eq!(r["boundaries_differing"], 2);
     assert_eq!(r["final_comparison"]["equal"], true);
 
@@ -136,9 +155,10 @@ fn reconvergence_and_multiple_segments_are_distinguished() {
     let d = result(&diverged);
     assert_eq!(diverged.outcome.as_deref(), Some("diverged"));
     assert_eq!(
-        d["divergent_segments"],
-        json!([{ "first": 2, "last": 2 }, { "first": 5, "last": 6 }])
+        intervals(d),
+        [(2, 2, "converged", Some(3)), (5, 6, "open_at_end", None)]
     );
+    assert_eq!(d["timeline"]["convergences"], 1);
 }
 
 #[test]

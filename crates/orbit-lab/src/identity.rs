@@ -209,8 +209,9 @@ impl ImplementationDescriptor {
     }
 }
 
-/// The build that ran an experiment. Recorded with every experiment, but not
-/// part of any fingerprint.
+/// The build that created an experiment. Recorded with every experiment,
+/// but not part of any fingerprint, so fingerprints stay comparable across
+/// builds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildInfo {
     /// `orbit-lab` crate version (the workspace version).
@@ -218,15 +219,142 @@ pub struct BuildInfo {
     /// Git commit the lab was built from, when the build could determine it.
     /// Uncommitted changes are not detected.
     pub git_commit: Option<String>,
+    /// SHA-256 of the executable file that was running, when it could be
+    /// read. Absent in experiments recorded before registry schema v2.
+    #[serde(default)]
+    pub executable_digest: Option<Digest>,
 }
 
 impl BuildInfo {
-    /// The running build.
+    /// The running build. The executable digest is computed once per process.
     #[must_use]
     pub fn current() -> Self {
         Self {
             orbit_version: env!("CARGO_PKG_VERSION").to_owned(),
             git_commit: option_env!("ORBIT_LAB_GIT_COMMIT").map(str::to_owned),
+            executable_digest: executable_digest(),
+        }
+    }
+}
+
+/// SHA-256 of the running executable, read from `std::env::current_exe()`
+/// once per process. `None` if the file cannot be read.
+///
+/// It identifies the exact compiled code of *every* implementation in the
+/// binary at once, so it is coarse: any change anywhere in the program
+/// changes it. A file replaced on disk after the process started is not
+/// detected.
+#[must_use]
+pub fn executable_digest() -> Option<Digest> {
+    static DIGEST: std::sync::OnceLock<Option<Digest>> = std::sync::OnceLock::new();
+    *DIGEST.get_or_init(|| {
+        let bytes = std::fs::read(std::env::current_exe().ok()?).ok()?;
+        Some(crate::digest::content_digest(&bytes))
+    })
+}
+
+/// How completely an experiment's implementations are identified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityCompleteness {
+    /// Only the declared descriptor (id, name, projection key, type name,
+    /// configuration, determinism). A code change that keeps these is invisible.
+    Declared,
+    /// Plus the Git commit the binary was built from. Uncommitted changes and
+    /// the build environment are not captured.
+    SourceRevision,
+    /// Plus the SHA-256 of the executable that ran: the exact compiled code,
+    /// for all implementations together.
+    Executable,
+}
+
+/// One side's declared and configuration identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SideIdentityReport {
+    /// `"left"` or `"right"`.
+    pub side: String,
+    /// Implementation id.
+    pub implementation: String,
+    /// Declared projection key.
+    pub projection: Value,
+    /// Descriptor fingerprint (declared identity).
+    pub fingerprint: Option<Digest>,
+    /// Configuration digest (configuration identity).
+    pub config_digest: Option<Digest>,
+}
+
+/// Declared, configuration and build identity of an experiment, with an
+/// honest completeness level. Derived from stored data, never stored itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IdentityAssessment {
+    /// Declared and configuration identity per side.
+    pub sides: Vec<SideIdentityReport>,
+    /// The build that created the experiment.
+    pub build: BuildInfo,
+    /// Completeness level.
+    pub completeness: IdentityCompleteness,
+    /// What the identity does not capture, in plain words.
+    pub gaps: Vec<String>,
+}
+
+impl IdentityAssessment {
+    /// Assesses stored descriptors (`[{"side", "descriptor"}]`) and a build.
+    #[must_use]
+    pub fn assess(implementations: &Value, build: &BuildInfo) -> Self {
+        let digest = |v: &Value, pointer: &str| {
+            v.pointer(pointer)
+                .and_then(Value::as_str)
+                .and_then(|h| Digest::from_hex(h).ok())
+        };
+        let sides = implementations
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| SideIdentityReport {
+                        side: e["side"].as_str().unwrap_or_default().to_owned(),
+                        implementation: e
+                            .pointer("/descriptor/id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        projection: e
+                            .pointer("/descriptor/projection")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        fingerprint: digest(e, "/descriptor/fingerprint"),
+                        config_digest: digest(e, "/descriptor/config_digest"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let completeness = if build.executable_digest.is_some() {
+            IdentityCompleteness::Executable
+        } else if build.git_commit.is_some() {
+            IdentityCompleteness::SourceRevision
+        } else {
+            IdentityCompleteness::Declared
+        };
+        let mut gaps = vec![
+            "fingerprints cover registration metadata and configuration, not code; they do not establish semantic equivalence".to_owned(),
+        ];
+        match completeness {
+            IdentityCompleteness::Executable => gaps.push(
+                "the executable digest covers the whole binary, so it changes with any code change and cannot single out one implementation".to_owned(),
+            ),
+            IdentityCompleteness::SourceRevision => {
+                gaps.push("no executable digest was recorded".to_owned());
+                gaps.push("uncommitted changes at build time are not detected".to_owned());
+            }
+            IdentityCompleteness::Declared => {
+                gaps.push("no source revision or executable digest was recorded".to_owned());
+            }
+        }
+        Self {
+            sides,
+            build: build.clone(),
+            completeness,
+            gaps,
         }
     }
 }

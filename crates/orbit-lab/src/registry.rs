@@ -42,18 +42,19 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::error::{LabError, Result};
-use crate::identity::BuildInfo;
+use crate::identity::{BuildInfo, IdentityAssessment};
 use crate::spec::{DIFFERENTIAL_REPLAY, DifferentialSpec, SPEC_VERSION};
 
 /// `PRAGMA application_id` of lab registries (`"ORLB"`). Distinct from the
 /// event store's, so neither can be opened as the other.
 pub const APPLICATION_ID: i64 = 0x4F52_4C42;
 /// Newest registry schema version.
-pub const LATEST_VERSION: i64 = 1;
+pub const LATEST_VERSION: i64 = 2;
 /// How long a writer waits for a lock held by another connection.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MIGRATIONS: [&str; 1] = [r"
+const MIGRATIONS: [&str; 2] = [
+    r"
 CREATE TABLE experiments (
     id              BLOB PRIMARY KEY CHECK (length(id) = 16),
     kind            TEXT NOT NULL CHECK (kind IN ('differential_replay')),
@@ -152,7 +153,27 @@ CREATE TRIGGER verifications_no_update BEFORE UPDATE ON verifications
 BEGIN SELECT RAISE(ABORT, 'verifications are immutable'); END;
 CREATE TRIGGER verifications_no_delete BEFORE DELETE ON verifications
 BEGIN SELECT RAISE(ABORT, 'verifications are never deleted'); END;
-"];
+",
+    r"
+-- v2 (Sprint 8): record the digest of the executable that created an
+-- experiment, and keep it immutable like the other identity columns.
+ALTER TABLE experiments ADD COLUMN executable_digest BLOB
+    CHECK (executable_digest IS NULL OR length(executable_digest) = 32);
+
+DROP TRIGGER experiments_identity_is_immutable;
+CREATE TRIGGER experiments_identity_is_immutable BEFORE UPDATE ON experiments
+WHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind
+  OR NEW.spec_version IS NOT OLD.spec_version OR NEW.spec IS NOT OLD.spec
+  OR NEW.spec_digest IS NOT OLD.spec_digest OR NEW.stream_id IS NOT OLD.stream_id
+  OR NEW.left_impl IS NOT OLD.left_impl OR NEW.right_impl IS NOT OLD.right_impl
+  OR NEW.implementations IS NOT OLD.implementations
+  OR NEW.orbit_version IS NOT OLD.orbit_version OR NEW.git_commit IS NOT OLD.git_commit
+  OR NEW.executable_digest IS NOT OLD.executable_digest
+  OR NEW.created_at IS NOT OLD.created_at
+  OR (OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at)
+BEGIN SELECT RAISE(ABORT, 'experiment identity columns are immutable'); END;
+",
+];
 
 /// Identifier of an experiment (UUIDv7, so ids sort by creation time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -386,6 +407,9 @@ pub struct ExperimentRecord {
     pub failure: Option<Failure>,
     /// Attached artifacts.
     pub artifacts: Vec<ArtifactRef>,
+    /// Declared, configuration and build identity with its completeness.
+    /// Derived from the stored descriptors and build when loaded.
+    pub identity: IdentityAssessment,
 }
 
 /// A row of [`Registry::list`].
@@ -521,8 +545,8 @@ impl Registry {
         conn.execute(
             "INSERT INTO experiments (id, kind, spec_version, spec, spec_digest, stream_id,
                  left_impl, right_impl, implementations, orbit_version, git_commit,
-                 created_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'created')",
+                 executable_digest, created_at, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'created')",
             params![
                 id.0.as_bytes().as_slice(),
                 DIFFERENTIAL_REPLAY,
@@ -535,6 +559,7 @@ impl Registry {
                 to_canonical_string(&new.implementations),
                 new.build.orbit_version,
                 new.build.git_commit,
+                new.build.executable_digest.map(|d| d.as_bytes().to_vec()),
                 now()?,
             ],
         )?;
@@ -688,7 +713,8 @@ impl Registry {
             .query_row(
                 "SELECT id, kind, spec_version, spec, spec_digest, implementations, orbit_version,
                         git_commit, created_at, status, started_at, finished_at, elapsed_micros,
-                        input, outcome, result, result_digest, reproducibility, failure
+                        input, outcome, result, result_digest, reproducibility, failure,
+                        executable_digest
                  FROM experiments WHERE id = ?1",
                 [id.0.as_bytes().as_slice()],
                 RawExperiment::read,
@@ -905,6 +931,7 @@ struct RawExperiment {
     result_digest: Option<Vec<u8>>,
     reproducibility: Option<String>,
     failure: Option<String>,
+    executable_digest: Option<Vec<u8>>,
 }
 
 impl RawExperiment {
@@ -929,6 +956,7 @@ impl RawExperiment {
             result_digest: r.get(16)?,
             reproducibility: r.get(17)?,
             failure: r.get(18)?,
+            executable_digest: r.get(19)?,
         })
     }
 
@@ -940,17 +968,24 @@ impl RawExperiment {
             serde_json::from_str(text).map_err(|e| corrupt(&record, e))
         };
         let ts = |micros: i64| Timestamp::from_unix_micros(micros).map_err(|e| corrupt(&record, e));
+        let implementations = json(&self.implementations)?;
+        let build = BuildInfo {
+            orbit_version: self.orbit_version,
+            git_commit: self.git_commit,
+            executable_digest: self
+                .executable_digest
+                .map(|b| Digest::from_slice(&b).map_err(|e| c(&e)))
+                .transpose()?,
+        };
         Ok(ExperimentRecord {
             id,
             kind: self.kind,
             spec_version: u32::try_from(self.spec_version).map_err(|e| c(&e))?,
             spec: json(&self.spec)?,
             spec_digest: Digest::from_slice(&self.spec_digest).map_err(|e| c(&e))?,
-            implementations: json(&self.implementations)?,
-            build: BuildInfo {
-                orbit_version: self.orbit_version,
-                git_commit: self.git_commit,
-            },
+            identity: IdentityAssessment::assess(&implementations, &build),
+            implementations,
+            build,
             status: Status::parse(&self.status)
                 .ok_or_else(|| c(&format!("status {:?}", self.status)))?,
             created_at: ts(self.created_at)?,

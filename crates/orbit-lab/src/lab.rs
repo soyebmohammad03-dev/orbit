@@ -67,6 +67,39 @@ pub struct ArtifactVerification {
     pub artifacts: Vec<ArtifactCheck>,
 }
 
+/// Largest page of [`Lab::trace`].
+pub const MAX_TRACE_PAGE: usize = 1_000;
+
+/// One boundary of a trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TraceEntry {
+    /// Boundary.
+    pub boundary: u64,
+    /// Left state digest.
+    pub left: Digest,
+    /// Right state digest.
+    pub right: Digest,
+    /// Whether they are equal.
+    pub equal: bool,
+}
+
+/// A page of [`Lab::trace`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TracePage {
+    /// Experiment.
+    pub experiment_id: ExperimentId,
+    /// First compared boundary of the experiment.
+    pub first_boundary: u64,
+    /// Last compared boundary, if any.
+    pub last_boundary: Option<u64>,
+    /// Number of compared boundaries.
+    pub boundaries_total: u64,
+    /// Entries of this page, in boundary order.
+    pub entries: Vec<TraceEntry>,
+    /// Pass as `from` to get the next page; absent on the last page.
+    pub next_from: Option<u64>,
+}
+
 /// The lab: registry, artifacts and catalog.
 #[derive(Debug)]
 pub struct Lab {
@@ -440,25 +473,34 @@ impl Lab {
     }
 
     /// Executes a completed experiment again from its persisted
-    /// specification, against `store`, and compares the new result digest
-    /// with the stored one. The attempt is recorded as a verification.
+    /// specification, against `store`, and compares the new result with the
+    /// stored one. Nothing is substituted: the same implementations (by id
+    /// and fingerprint), the same pinned history and the same comparison
+    /// rules are required, or the attempt is classified instead of run. The
+    /// attempt is recorded as a verification.
     ///
-    /// Status values:
+    /// Checks, in order, and their statuses:
     ///
     /// | Status | Meaning |
     /// |--------|---------|
-    /// | `reproduced` | Identical result document (same digest) |
-    /// | `differs` | The re-execution produced a different result |
-    /// | `history_unavailable` | The recorded events are gone or the stream is damaged |
+    /// | `configuration_mismatch` | The stored spec no longer matches its digest or cannot be read, the result was produced under other comparison rules, or the range exceeds this build's limits |
+    /// | `not_reproducible` | The original result was classified `not_reproducible`, or the re-execution was nondeterministic |
+    /// | `implementation_unavailable` | An implementation is not registered or its fingerprint changed |
+    /// | `history_unavailable` | The stream is missing, too short or fails verification |
     /// | `history_changed` | The events at the recorded boundaries have different digests |
-    /// | `implementation_unavailable` | An implementation is missing or its fingerprint changed |
+    /// | `reproduced` | Same result: identical traces and, for results of the current layout, an identical result document |
+    /// | `differs` | A different result; `detail.differences` names what differs |
+    ///
+    /// Results recorded by an older layout (Sprint 7, `result_version` 1)
+    /// are compared by their traces and a version-independent summary,
+    /// because the result document itself gained fields.
     ///
     /// # Errors
     /// [`LabError::InvalidState`] unless the experiment is `completed`.
     pub fn reproduce(&self, id: ExperimentId, store: &EventStore) -> Result<VerificationRecord> {
         let record = self.registry.get(id)?;
-        let (Status::Completed, Some(recorded_input), Some(recorded_digest)) =
-            (record.status, record.input.as_ref(), record.result_digest)
+        let (Status::Completed, Some(recorded_input), Some(recorded_result)) =
+            (record.status, record.input.as_ref(), record.result.as_ref())
         else {
             return Err(LabError::InvalidState {
                 id,
@@ -468,25 +510,96 @@ impl Lab {
                 ),
             });
         };
-        let mut spec = DifferentialSpec::from_json(record.spec.clone())?;
-        spec.to = Some(recorded_input.to);
-        let build = json!({ "recorded": record.build, "current": BuildInfo::current() });
-        let (status, detail) =
-            self.reproduction(&record, &spec, recorded_input, recorded_digest, store)?;
-        let mut detail = detail;
-        detail["build"] = build;
+        let current = BuildInfo::current();
+        let same_executable = match (record.build.executable_digest, current.executable_digest) {
+            (Some(a), Some(b)) => Some(a == b),
+            _ => None,
+        };
+        let (status, mut detail) =
+            self.reproduction(&record, recorded_input, recorded_result, store)?;
+        detail["build"] = json!({
+            "recorded": record.build,
+            "current": current,
+            "same_executable": same_executable,
+        });
+        detail["identity_completeness"] = json!(record.identity.completeness);
         self.registry
             .add_verification(id, VerificationKind::Reproduction, status, &detail)
+    }
+
+    /// The parts of a result that every layout records, used to compare
+    /// results of different layouts.
+    fn summary(result: &Value) -> Value {
+        json!({
+            "outcome": result["outcome"],
+            "input": result["input"],
+            "events_processed": result["events_processed"],
+            "events_fed_digest": result["events_fed_digest"],
+            "boundaries_compared": result["boundaries_compared"],
+            "boundaries_differing": result["boundaries_differing"],
+            "first_divergence_boundary": result.pointer("/first_divergence/boundary"),
+            "first_divergence_left": result.pointer("/first_divergence/left/digest"),
+            "first_divergence_right": result.pointer("/first_divergence/right/digest"),
+            "final_left": result.pointer("/final_comparison/left/digest"),
+            "final_right": result.pointer("/final_comparison/right/digest"),
+            "failures": result["failures"].as_array().map(|f| f.iter().map(|x| json!([x["side"], x["boundary"]])).collect::<Vec<_>>()),
+        })
     }
 
     fn reproduction(
         &self,
         record: &ExperimentRecord,
-        spec: &DifferentialSpec,
         recorded_input: &InputRange,
-        recorded_digest: Digest,
+        recorded_result: &Value,
         store: &EventStore,
     ) -> Result<(&'static str, Value)> {
+        // 1. The configuration must be exactly what was recorded.
+        let mut spec = match DifferentialSpec::from_json(record.spec.clone()) {
+            Ok(spec) => spec,
+            Err(e) => {
+                return Ok((
+                    "configuration_mismatch",
+                    json!({ "reason": format!("the stored specification cannot be read by this version: {e}") }),
+                ));
+            }
+        };
+        if spec.digest() != record.spec_digest {
+            return Ok((
+                "configuration_mismatch",
+                json!({ "reason": "the stored specification no longer matches its digest" }),
+            ));
+        }
+        let recorded_semantics = recorded_result
+            .pointer("/semantics/version")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        if recorded_semantics != u64::from(differential::SEMANTICS_VERSION) {
+            return Ok((
+                "configuration_mismatch",
+                json!({
+                    "reason": "the result was produced under different comparison rules",
+                    "recorded_semantics_version": recorded_semantics,
+                    "current_semantics_version": differential::SEMANTICS_VERSION,
+                }),
+            ));
+        }
+        if recorded_input.to > crate::spec::MAX_EVENTS {
+            return Ok((
+                "configuration_mismatch",
+                json!({ "reason": format!("the recorded range exceeds this build's limit of {} events", crate::spec::MAX_EVENTS) }),
+            ));
+        }
+        // 2. A result that was not reproducible cannot be reproduced.
+        if record.reproducibility.as_deref() == Some("not_reproducible") {
+            return Ok((
+                "not_reproducible",
+                json!({
+                    "reason": "the original result was classified not_reproducible",
+                    "reasons": recorded_result.pointer("/reproducibility/reasons"),
+                }),
+            ));
+        }
+        // 3. The same implementations, by id and fingerprint.
         for (side, implementation_id) in [(Side::Left, &spec.left), (Side::Right, &spec.right)] {
             let current = self.catalog.find(implementation_id);
             let recorded = Self::recorded_fingerprint(record, side);
@@ -510,7 +623,9 @@ impl Lab {
                 Some(_) => {}
             }
         }
-        let input = match differential::resolve_input(store, spec) {
+        // 4. The same pinned history.
+        spec.to = Some(recorded_input.to);
+        let input = match differential::resolve_input(store, &spec) {
             Ok(input) => input,
             Err(failure) => {
                 return Ok(("history_unavailable", json!({ "failure": failure })));
@@ -522,27 +637,124 @@ impl Lab {
                 json!({ "recorded": recorded_input, "current": input }),
             ));
         }
-        let [left, right] = self.implementations(spec)?;
-        let run = match differential::execute(store, spec, &input, left.as_ref(), right.as_ref()) {
+        // 5. Execute and compare.
+        let [left, right] = self.implementations(&spec)?;
+        let run = match differential::execute(store, &spec, &input, left.as_ref(), right.as_ref()) {
             Ok(run) => run,
             Err(failure) => return Ok(("history_unavailable", json!({ "failure": failure }))),
         };
+        if run.result.outcome == differential::Outcome::Nondeterministic {
+            return Ok((
+                "not_reproducible",
+                json!({ "reason": "an implementation behaved nondeterministically when executed again", "determinism": run.result.determinism }),
+            ));
+        }
         let result = json_of(&run.result)?;
         let digest = value_digest(RESULT_TAG, &result);
+        let mut differences = Vec::new();
+        for role in ["left_trace", "right_trace"] {
+            let recorded = record
+                .artifacts
+                .iter()
+                .find(|a| a.role == role)
+                .map(|a| a.digest);
+            let current = run
+                .artifacts
+                .iter()
+                .find(|(r, _, _)| r == role)
+                .map(|(_, _, bytes)| crate::digest::content_digest(bytes));
+            if recorded != current {
+                differences.push(role.to_owned());
+            }
+        }
+        let recorded_version = recorded_result
+            .get("result_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        let same_layout = recorded_version == u64::from(differential::RESULT_VERSION);
+        if same_layout {
+            if Some(digest) != record.result_digest {
+                differences.push("result_document".to_owned());
+            }
+        } else {
+            let (old, new) = (Self::summary(recorded_result), Self::summary(&result));
+            if let (Some(old), Some(new)) = (old.as_object(), new.as_object()) {
+                differences.extend(old.keys().filter(|k| old.get(*k) != new.get(*k)).cloned());
+            }
+        }
         let detail = json!({
-            "recorded_result_digest": recorded_digest,
+            "compared": if same_layout { "full_result" } else { "traces_and_summary" },
+            "recorded_result_version": recorded_version,
+            "recorded_result_digest": record.result_digest,
             "reproduced_result_digest": digest,
             "recorded_outcome": record.outcome,
             "reproduced_outcome": run.result.outcome.label(),
+            "differences": differences,
         });
         Ok((
-            if digest == recorded_digest {
+            if differences.is_empty() {
                 "reproduced"
             } else {
                 "differs"
             },
             detail,
         ))
+    }
+
+    /// A page of an experiment's per-boundary trace: both state digests and
+    /// whether they are equal, read from the verified trace artifacts.
+    ///
+    /// # Errors
+    /// [`LabError::InvalidState`] unless completed, or artifact errors.
+    pub fn trace(&self, id: ExperimentId, from: Option<u64>, limit: usize) -> Result<TracePage> {
+        let record = self.registry.get(id)?;
+        let (Status::Completed, Some(input)) = (record.status, record.input.as_ref()) else {
+            return Err(LabError::InvalidState {
+                id,
+                reason: "only completed experiments have a trace".to_owned(),
+            });
+        };
+        let left = self.artifact(id, "left_trace")?;
+        let right = self.artifact(id, "right_trace")?;
+        if left.len() != right.len() || left.len() % 32 != 0 {
+            return Err(LabError::CorruptRecord {
+                record: id.to_string(),
+                reason: "trace artifacts have inconsistent lengths".to_owned(),
+            });
+        }
+        let total = (left.len() / 32) as u64;
+        let limit = limit.clamp(1, MAX_TRACE_PAGE) as u64;
+        let start = from.unwrap_or(input.from).max(input.from);
+        let first_index = (start - input.from).min(total);
+        let end_index = first_index.saturating_add(limit).min(total);
+        let digest = |bytes: &[u8], i: u64| {
+            let at = usize::try_from(i * 32).unwrap_or(usize::MAX);
+            Digest::from_slice(&bytes[at..at + 32])
+        };
+        let mut entries = Vec::new();
+        for i in first_index..end_index {
+            let (l, r) = (digest(&left, i), digest(&right, i));
+            let (Ok(l), Ok(r)) = (l, r) else {
+                return Err(LabError::CorruptRecord {
+                    record: id.to_string(),
+                    reason: "unreadable trace digest".to_owned(),
+                });
+            };
+            entries.push(TraceEntry {
+                boundary: input.from + i,
+                left: l,
+                right: r,
+                equal: l == r,
+            });
+        }
+        Ok(TracePage {
+            experiment_id: id,
+            first_boundary: input.from,
+            last_boundary: (total > 0).then(|| input.from + total - 1),
+            boundaries_total: total,
+            entries,
+            next_from: (end_index < total).then(|| input.from + end_index),
+        })
     }
 
     /// Verifications of an experiment, oldest first.
