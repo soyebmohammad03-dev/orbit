@@ -842,7 +842,17 @@ export interface ValidationReport {
     history: "included_and_verified" | "not_included" | "invalid";
     independently_replayable: boolean;
     replayability: string;
+    /** Who signed it, judged only against the server's configured trust store. */
+    authenticity: Authenticity;
     limitations: string[];
+}
+
+export interface Authenticity {
+    status: "unsigned" | "signed_untrusted" | "trusted";
+    trusted_keys: string[];
+    untrusted_keys: string[];
+    trust_store_configured: boolean;
+    note: string;
 }
 
 export interface ImportedBundleSummary {

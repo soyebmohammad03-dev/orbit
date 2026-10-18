@@ -539,3 +539,82 @@ proptest::proptest! {
         proptest::prop_assert_eq!(base64_decode(&base64_encode(&bytes)).unwrap(), bytes);
     }
 }
+
+mod signatures {
+    use super::*;
+    use orbit_lab::signing::{SigningKeyFile, TrustStore};
+
+    #[test]
+    fn signing_is_separate_from_integrity_and_trust_is_explicit() {
+        let env = Env::new();
+        let lab = env.lab();
+        let (_, bytes) = differential_bundle(&env, &lab, true);
+        let (unsigned, _) = validate(&bytes);
+        assert_eq!(unsigned.authenticity.status, "unsigned");
+
+        let key = SigningKeyFile::generate("orbit-lab-1").unwrap();
+        let signed = bundle::sign(&bytes, &key).unwrap();
+        // Signing leaves the bundle digest (and so its identity) unchanged.
+        let (plain, _) = validate(&signed);
+        assert!(plain.valid);
+        assert_eq!(plain.bundle_digest, unsigned.bundle_digest);
+        assert_eq!(
+            plain.authenticity.status, "signed_untrusted",
+            "no trust store, no trust"
+        );
+
+        let trust = TrustStore::new(vec![key.public().unwrap()]).unwrap();
+        let (trusted, _) = bundle::validate_with(&signed, Some(&trust));
+        assert_eq!(trusted.authenticity.status, "trusted");
+        assert_eq!(trusted.authenticity.trusted_keys, ["orbit-lab-1"]);
+
+        // An unknown key, even one reusing the trusted key's id.
+        let impostor = SigningKeyFile::generate("orbit-lab-1").unwrap();
+        let forged = bundle::sign(&bytes, &impostor).unwrap();
+        let (r, _) = bundle::validate_with(&forged, Some(&trust));
+        assert!(r.valid);
+        assert_eq!(r.authenticity.status, "signed_untrusted");
+
+        // Content altered after signing (digests recomputed): the bundle
+        // digest changes, so the signature fails and the bundle is invalid.
+        let mut b = parse(&signed);
+        b["document"]["experiment"]["result"]["outcome"] = json!("equivalent");
+        b["document"]["experiment"]["outcome"] = json!("equivalent");
+        let altered = reseal(b);
+        let (r, _) = bundle::validate_with(&altered, Some(&trust));
+        assert!(!r.valid);
+        assert_eq!(
+            r.errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            ["invalid_signature"]
+        );
+
+        // Malformed signature fields.
+        let mut b = parse(&signed);
+        b["signatures"][0]["signature"] = json!("abc");
+        let (r, _) = validate(to_canonical_string(&b).as_bytes());
+        assert_eq!(r.errors[0].code, "malformed_signature");
+        let mut b = parse(&signed);
+        b["signatures"][0]["comment"] = json!("trust me");
+        let (r, _) = validate(to_canonical_string(&b).as_bytes());
+        assert_eq!(r.errors[0].code, "invalid_structure");
+
+        // An invalid bundle is never signed.
+        assert!(bundle::sign(&bytes[..bytes.len() / 2], &key).is_err());
+
+        // Imports keep the signatures and record the authenticity seen then.
+        let elsewhere = Env::new();
+        let other = elsewhere.lab();
+        let imported = other.import_bundle_with(&signed, Some(&trust)).unwrap();
+        assert_eq!(
+            imported.bundle.validation["authenticity"]["status"],
+            "trusted"
+        );
+        let attempt = other
+            .reproduce_bundle(imported.bundle.bundle_digest, &RegressionPolicy::default())
+            .unwrap();
+        assert_eq!(
+            attempt.status, "reproduced",
+            "the stored bundle, with its signature, still validates"
+        );
+    }
+}

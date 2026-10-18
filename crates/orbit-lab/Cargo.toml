@@ -8,6 +8,8 @@ publish.workspace = true
 default-run = "orbit-lab"
 
 [dependencies]
+ed25519-dalek = "2.2.0"
+getrandom = "0.3.4"
 orbit-core = { version = "0.1.0", path = "../orbit-core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

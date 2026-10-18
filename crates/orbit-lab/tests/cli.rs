@@ -248,3 +248,63 @@ fn compare_independent_runs_from_the_command_line() {
     let (ok, _, err) = cli(&env, &["compare-runs", "--baseline", &base[0]]);
     assert!(!ok && err.contains("--candidate"), "{err}");
 }
+
+#[test]
+fn keygen_sign_and_validate_against_a_trust_store() {
+    let env = Env::new();
+    {
+        let store = env.store();
+        seed(&store, "c", vec![inc(1), dec(2)]);
+    }
+    let (ok, run, err) = cli(
+        &env,
+        &[
+            "run",
+            "--stream",
+            "c",
+            "--left",
+            "orbit.counter",
+            "--right",
+            "orbit.counter",
+        ],
+    );
+    assert!(ok, "{err}");
+    let id = run["id"].as_str().unwrap().to_owned();
+    let p = |name: &str| env.dir.path().join(name).to_str().unwrap().to_owned();
+    let (bundle, signed, key, trusted) =
+        (p("b.json"), p("s.json"), p("key.json"), p("trusted.json"));
+    assert!(cli(&env, &["export", &id, "--out", &bundle]).0);
+    let (ok, keygen, err) = cli(
+        &env,
+        &[
+            "keygen",
+            "--key-id",
+            "ci",
+            "--out",
+            &key,
+            "--public-out",
+            &trusted,
+        ],
+    );
+    assert!(ok, "{err}");
+    let secret = std::fs::read_to_string(&key).unwrap();
+    let secret: Value = serde_json::from_str(&secret).unwrap();
+    assert!(
+        !keygen
+            .to_string()
+            .contains(secret["secret_key"].as_str().unwrap()),
+        "the secret is never printed"
+    );
+    let (ok, _, err) = cli(&env, &["keygen", "--key-id", "ci", "--out", &key]);
+    assert!(
+        !ok && err.contains("cannot write"),
+        "an existing key file is not overwritten: {err}"
+    );
+    assert!(cli(&env, &["sign", &bundle, "--key", &key, "--out", &signed]).0);
+    let (_, plain, _) = cli(&env, &["validate", &signed]);
+    assert_eq!(plain["authenticity"]["status"], "signed_untrusted");
+    let (_, with_trust, _) = cli(&env, &["validate", &signed, "--trusted-keys", &trusted]);
+    assert_eq!(with_trust["authenticity"]["status"], "trusted");
+    let (_, unsigned, _) = cli(&env, &["validate", &bundle, "--trusted-keys", &trusted]);
+    assert_eq!(unsigned["authenticity"]["status"], "unsigned");
+}

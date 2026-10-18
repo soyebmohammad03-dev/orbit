@@ -475,3 +475,48 @@ async fn sets_of_runs_are_compared_on_their_medians() {
         "invalid_body",
     );
 }
+
+#[tokio::test]
+async fn bundle_signatures_are_trusted_only_by_configuration() {
+    use orbit_lab::signing::{SigningKeyFile, TrustStore};
+    let plain = TestApi::with_lab();
+    let id = differential_experiment(&plain).await;
+    let (_, _, bytes) = plain
+        .send_raw(
+            "GET",
+            &format!("/api/v1/lab/experiments/{id}/bundle"),
+            Vec::new(),
+        )
+        .await;
+    let key = SigningKeyFile::generate("api-test").unwrap();
+    let signed = orbit_lab::bundle::sign(&bytes, &key).unwrap();
+    let (_, _, report) = plain
+        .send_raw("POST", "/api/v1/lab/bundles/validate", signed.clone())
+        .await;
+    let report: Value = serde_json::from_slice(&report).unwrap();
+    assert_eq!(report["authenticity"]["status"], "signed_untrusted");
+    assert_eq!(report["authenticity"]["trust_store_configured"], false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = EventStore::open(
+        StoreConfig::new(dir.path().join("orbit.db")).with_durability(Durability::Normal),
+    )
+    .unwrap();
+    let lab = orbit_lab::Lab::open(&dir.path().join("lab"), orbit_lab::Catalog::builtin()).unwrap();
+    let state = AppState::new(store, None)
+        .with_lab(lab)
+        .with_trusted_keys(TrustStore::new(vec![key.public().unwrap()]).unwrap());
+    let trusting = TestApi {
+        app: router(state, &common::origins()),
+        dir,
+    };
+    let (status, _, imported) = trusting
+        .send_raw("POST", "/api/v1/lab/bundles", signed)
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let imported: Value = serde_json::from_slice(&imported).unwrap();
+    assert_eq!(
+        imported["bundle"]["validation"]["authenticity"]["status"],
+        "trusted"
+    );
+}

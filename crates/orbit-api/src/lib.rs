@@ -57,6 +57,8 @@ pub struct AppState {
     /// Launches reliability runs in the separately configured runner
     /// process, if enabled (see [`ApiConfig::reliability_runner`]).
     pub reliability: Option<Arc<orbit_lab::reliability::launcher::Launcher>>,
+    /// Keys whose bundle signatures are trusted, if configured.
+    pub trusted_keys: Option<Arc<orbit_lab::signing::TrustStore>>,
 }
 
 impl AppState {
@@ -80,7 +82,15 @@ impl AppState {
             lab: None,
             measuring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reliability: None,
+            trusted_keys: None,
         }
+    }
+
+    /// Trusts bundle signatures by the keys in `store`.
+    #[must_use]
+    pub fn with_trusted_keys(mut self, store: orbit_lab::signing::TrustStore) -> Self {
+        self.trusted_keys = Some(Arc::new(store));
+        self
     }
 
     /// Enables launching reliability runs with `launcher`.

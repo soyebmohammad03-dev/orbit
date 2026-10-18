@@ -47,6 +47,7 @@ pub mod performance;
 pub mod registry;
 pub mod reliability;
 pub mod reproduction;
+pub mod signing;
 pub mod spec;
 pub mod variants;
 

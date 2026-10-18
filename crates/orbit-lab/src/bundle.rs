@@ -316,6 +316,9 @@ struct RawBundle {
     manifest: Value,
     document: Value,
     entries: BTreeMap<String, String>,
+    /// Optional signatures over the bundle digest (not covered by it).
+    #[serde(default)]
+    signatures: Vec<crate::signing::BundleSignature>,
 }
 
 /// An exported bundle.
@@ -423,6 +426,9 @@ pub struct ValidationReport {
     pub independently_replayable: bool,
     /// The reason for `independently_replayable`.
     pub replayability: String,
+    /// What the bundle's signatures establish, against the trust store
+    /// given to [`validate_with`] (none for [`validate`]).
+    pub authenticity: crate::signing::Authenticity,
     /// Limitations of what validation shows.
     pub limitations: Vec<&'static str>,
 }
@@ -440,6 +446,8 @@ pub struct ValidBundle {
     pub entries: BTreeMap<String, Vec<u8>>,
     /// The verified input history, when included.
     pub history: Option<MemoryHistory>,
+    /// Its signatures (all verified).
+    pub signatures: Vec<crate::signing::BundleSignature>,
 }
 
 struct Checker {
@@ -481,10 +489,20 @@ fn json_error(e: &serde_json::Error) -> &'static str {
     }
 }
 
-/// Validates bundle bytes. Never panics on any input; never executes or
+/// Validates bundle bytes without a trust store: a validly signed bundle is
+/// `signed_untrusted` at best. Never panics on any input; never executes or
 /// writes anything.
 #[must_use]
 pub fn validate(bytes: &[u8]) -> (ValidationReport, Option<ValidBundle>) {
+    validate_with(bytes, None)
+}
+
+/// Validates bundle bytes, classifying signatures against `trust`.
+#[must_use]
+pub fn validate_with(
+    bytes: &[u8],
+    trust: Option<&crate::signing::TrustStore>,
+) -> (ValidationReport, Option<ValidBundle>) {
     let mut c = Checker {
         report: ValidationReport {
             valid: false,
@@ -501,17 +519,22 @@ pub fn validate(bytes: &[u8]) -> (ValidationReport, Option<ValidBundle>) {
             history: "invalid",
             independently_replayable: false,
             replayability: String::new(),
+            authenticity: crate::signing::authenticity(&[], trust),
             limitations: LIMITATIONS.to_vec(),
         },
     };
-    let parsed = check(&mut c, bytes);
+    let parsed = check(&mut c, bytes, trust);
     let report = c.finish();
     let valid = report.valid;
     (report, parsed.filter(|_| valid))
 }
 
 #[allow(clippy::too_many_lines)]
-fn check(c: &mut Checker, bytes: &[u8]) -> Option<ValidBundle> {
+fn check(
+    c: &mut Checker,
+    bytes: &[u8],
+    trust: Option<&crate::signing::TrustStore>,
+) -> Option<ValidBundle> {
     if bytes.len() > MAX_BUNDLE_BYTES {
         c.fail(
             "too_large",
@@ -563,6 +586,16 @@ fn check(c: &mut Checker, bytes: &[u8]) -> Option<ValidBundle> {
         }
     };
     let _ = (&raw.format, raw.format_version);
+    if raw.signatures.len() > crate::signing::MAX_SIGNATURES {
+        c.fail(
+            "malformed_signature",
+            format!(
+                "at most {} signatures are accepted",
+                crate::signing::MAX_SIGNATURES
+            ),
+        );
+        return None;
+    }
     let manifest: Manifest = match serde_json::from_value(raw.manifest.clone()) {
         Ok(m) => m,
         Err(e) => {
@@ -829,12 +862,30 @@ fn check(c: &mut Checker, bytes: &[u8]) -> Option<ValidBundle> {
     };
     c.report.independently_replayable = replayable;
     c.report.replayability = why;
+
+    // Signatures cover the bundle digest; each must verify.
+    let mut verified = Vec::new();
+    for (i, sig) in raw.signatures.iter().enumerate() {
+        if raw.signatures[..i].iter().any(|o| o.key_id == sig.key_id) {
+            c.fail(
+                "malformed_signature",
+                format!("key id {:?} signs twice", sig.key_id),
+            );
+            continue;
+        }
+        match sig.verify(&digest) {
+            Ok(key) => verified.push((sig.key_id.clone(), key)),
+            Err((code, message)) => c.fail(code, message),
+        }
+    }
+    c.report.authenticity = crate::signing::authenticity(&verified, trust);
     Some(ValidBundle {
         digest,
         manifest,
         document,
         entries,
         history,
+        signatures: raw.signatures,
     })
 }
 
@@ -984,7 +1035,20 @@ impl Lab {
     /// # Errors
     /// [`LabError::InvalidBundle`] with the report, or storage errors.
     pub fn import_bundle(&self, bytes: &[u8]) -> Result<ImportOutcome> {
-        let (report, valid) = validate(bytes);
+        self.import_bundle_with(bytes, None)
+    }
+
+    /// [`import_bundle`](Self::import_bundle), classifying signatures
+    /// against `trust` (recorded in the stored validation report).
+    ///
+    /// # Errors
+    /// As [`import_bundle`](Self::import_bundle).
+    pub fn import_bundle_with(
+        &self,
+        bytes: &[u8],
+        trust: Option<&crate::signing::TrustStore>,
+    ) -> Result<ImportOutcome> {
+        let (report, valid) = validate_with(bytes, trust);
         let Some(valid) = valid else {
             return Err(LabError::InvalidBundle(Box::new(report)));
         };
@@ -995,6 +1059,7 @@ impl Lab {
         let document = json!({
             "manifest": valid.manifest,
             "document": valid.document,
+            "signatures": valid.signatures,
         });
         let newly_imported = self.registry().insert_imported_bundle(
             valid.digest,
@@ -1045,6 +1110,7 @@ impl Lab {
             "manifest": imported.document["manifest"],
             "document": imported.document["document"],
             "entries": entries,
+            "signatures": imported.document.get("signatures").cloned().unwrap_or_else(|| json!([])),
         });
         let (report, valid) = validate(to_canonical_string(&bundle).as_bytes());
         let valid = valid.ok_or_else(|| LabError::InvalidBundle(Box::new(report)))?;
@@ -1140,6 +1206,29 @@ impl Lab {
         self.registry()
             .add_bundle_verification(digest, status.as_str(), &detail)
     }
+}
+
+/// Adds (or replaces) the signature of `key` on a valid bundle and returns
+/// the new bundle bytes (canonical). The bundle digest is unchanged:
+/// signatures are not covered by it.
+///
+/// # Errors
+/// [`LabError::InvalidBundle`] if the bundle is not valid, or a malformed key.
+pub fn sign(bytes: &[u8], key: &crate::signing::SigningKeyFile) -> Result<Vec<u8>> {
+    let (report, valid) = validate(bytes);
+    let Some(valid) = valid else {
+        return Err(LabError::InvalidBundle(Box::new(report)));
+    };
+    let mut value: Value = serde_json::from_slice(bytes)?;
+    let signature = key.sign(&valid.digest)?;
+    let mut signatures: Vec<crate::signing::BundleSignature> = valid
+        .signatures
+        .into_iter()
+        .filter(|s| s.key_id != signature.key_id)
+        .collect();
+    signatures.push(signature);
+    value["signatures"] = serde_json::to_value(&signatures)?;
+    Ok(to_canonical_string(&value).into_bytes())
 }
 
 fn not_included(reason: String) -> HistoryInfo {

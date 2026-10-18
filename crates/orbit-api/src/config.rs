@@ -44,6 +44,9 @@ pub struct ApiConfig {
     /// launched for reliability runs (absolute path), or `None`: launching
     /// is disabled, which is the default. Its deadline per run.
     pub reliability_runner: Option<(PathBuf, Duration)>,
+    /// A trusted-keys file for bundle signatures, or `None` (default): no
+    /// signature is trusted, so signed bundles are `signed_untrusted`.
+    pub trusted_keys: Option<PathBuf>,
 }
 
 /// Invalid API configuration.
@@ -96,6 +99,7 @@ impl ApiConfig {
     /// | `ORBIT_LAB_DIR` | `data/lab` (empty disables the lab endpoints) |
     /// | `ORBIT_RELIABILITY_RUNNER` | unset: reliability runs cannot be launched. An absolute path to the separately built `orbit-reliability` tool enables `POST /lab/reliability/runs` |
     /// | `ORBIT_RELIABILITY_TIMEOUT_SECS` | `900` (1–3600), the deadline of one launched run |
+    /// | `ORBIT_TRUSTED_KEYS` | unset: no bundle signing key is trusted. A trusted-keys file (see docs/EVIDENCE.md) |
     ///
     /// plus every store variable understood by [`StoreConfig::from_lookup`].
     ///
@@ -209,6 +213,9 @@ impl ApiConfig {
             request_timeout,
             lab_dir,
             reliability_runner,
+            trusted_keys: lookup("ORBIT_TRUSTED_KEYS")
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| PathBuf::from(p.trim())),
         })
     }
 }

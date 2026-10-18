@@ -51,6 +51,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if config.reliability_runner.is_some() {
         tracing::warn!("ORBIT_RELIABILITY_RUNNER is ignored because the lab is disabled");
     }
+    if let Some(path) = config.trusted_keys.clone() {
+        let store = orbit_lab::signing::TrustStore::read(&path)?;
+        tracing::info!(
+            keys = store.keys.len(),
+            "bundle signatures by the configured keys are trusted"
+        );
+        state = state.with_trusted_keys(store);
+    }
     let app = router(state, &config.cors_origins);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;

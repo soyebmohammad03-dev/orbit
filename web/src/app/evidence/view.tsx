@@ -29,7 +29,13 @@ import {
     reproductionTone,
     shortDigest,
 } from "@/lib/format";
-import type { BundleVerification, ImportOutcome, ImportedBundleSummary, ValidationReport } from "@/lib/types";
+import type {
+    Authenticity,
+    BundleVerification,
+    ImportOutcome,
+    ImportedBundleSummary,
+    ValidationReport,
+} from "@/lib/types";
 import { useAction, useApi } from "@/lib/use-api";
 
 const PAGE = 50;
@@ -243,6 +249,28 @@ function UploadBundle({ onImported }: { onImported: (o: ImportOutcome) => void }
     );
 }
 
+const AUTHENTICITY_LABELS = {
+    unsigned: "unsigned: origin not established",
+    signed_untrusted: "signed, by a key not trusted here",
+    trusted: "signed by a trusted key",
+} as const;
+
+/** Authenticity, apart from integrity: a signature counts only for a configured trusted key. */
+export function AuthenticityView({ authenticity }: { authenticity: Authenticity | undefined }) {
+    if (!authenticity) return null;
+    const keys = [...authenticity.trusted_keys, ...authenticity.untrusted_keys];
+    return (
+        <p className="flex flex-wrap items-center gap-2 text-xs text-muted">
+            <Badge tone={authenticity.status === "trusted" ? "ok" : "warn"}>
+                {AUTHENTICITY_LABELS[authenticity.status]}
+            </Badge>
+            {keys.length > 0 ? <span>Key ids: {keys.join(", ")}.</span> : null}
+            <span>{authenticity.note}</span>
+            {!authenticity.trust_store_configured ? <span>No trust store is configured on this server.</span> : null}
+        </p>
+    );
+}
+
 /** A validation report. Integrity and scientific correctness are shown separately. */
 export function ValidationReportView({ report }: { report: ValidationReport }) {
     return (
@@ -265,6 +293,7 @@ export function ValidationReportView({ report }: { report: ValidationReport }) {
                     history {report.history.replaceAll("_", " ")}
                 </Badge>
             </span>
+            <AuthenticityView authenticity={report.authenticity} />
             {report.bundle_digest ? (
                 <p className="text-xs text-muted">
                     Bundle digest <Digest value={report.bundle_digest} />
@@ -354,6 +383,10 @@ function BundlePanel({ digest }: { digest: string }) {
                                 : `not included (${doc.history.reason ?? "no reason given"})`,
                         ],
                         ["Imported", formatTimestamp(bundle.imported_at)],
+                        [
+                            "Authenticity at import",
+                            <AuthenticityView key="auth" authenticity={bundle.validation.authenticity} />,
+                        ],
                     ]}
                 />
                 <h3 className="mb-1 mt-4 text-sm font-medium text-text">Entries</h3>

@@ -192,6 +192,13 @@ function report(over: Partial<ValidationReport>): ValidationReport {
         history: "included_and_verified",
         independently_replayable: true,
         replayability: "the verified input history is included",
+        authenticity: {
+            status: "unsigned",
+            trusted_keys: [],
+            untrusted_keys: [],
+            trust_store_configured: false,
+            note: "unsigned: who produced this bundle is not established",
+        },
         limitations: ["a valid bundle is not signed"],
         ...over,
     };
@@ -203,6 +210,26 @@ describe("bundle validation reports", () => {
         expect(screen.getByText("integrity verified")).toBeInTheDocument();
         expect(screen.getByText("scientific correctness not verified")).toBeInTheDocument();
         expect(screen.getByText(/Replayable from the bundle/)).toBeInTheDocument();
+        expect(screen.getByText("unsigned: origin not established")).toBeInTheDocument();
+    });
+
+    it("never presents an untrusted signature as trusted", () => {
+        render(
+            <ValidationReportView
+                report={report({
+                    authenticity: {
+                        status: "signed_untrusted",
+                        trusted_keys: [],
+                        untrusted_keys: ["someone"],
+                        trust_store_configured: true,
+                        note: "the signatures are valid, but no signing key is trusted here",
+                    },
+                })}
+            />,
+        );
+        expect(screen.getByText("signed, by a key not trusted here")).toBeInTheDocument();
+        expect(screen.getByText(/Key ids: someone/)).toBeInTheDocument();
+        expect(screen.queryByText("signed by a trusted key")).not.toBeInTheDocument();
     });
 
     it("lists every problem with its code", () => {

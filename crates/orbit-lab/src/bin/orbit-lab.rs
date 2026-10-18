@@ -24,8 +24,12 @@
 //!                                     their per-run medians
 //!   export ID --out FILE              write an evidence bundle (with the
 //!                                     input history when --db has it)
-//!   validate FILE                     validate a bundle; nothing is stored
-//!   import FILE                       validate and import a bundle
+//!   validate FILE [--trusted-keys F]  validate a bundle; nothing is stored
+//!   import FILE [--trusted-keys F]    validate and import a bundle
+//!   keygen --key-id ID --out KEY [--public-out TRUSTED]
+//!                                     create an Ed25519 signing key (and a
+//!                                     trusted-keys file with its public key)
+//!   sign FILE --key KEY --out SIGNED  sign a valid bundle
 //!   bundles [--limit N]               imported bundles, newest first
 //!   reproduce-bundle DIGEST           reproduce an imported bundle
 //! ```
@@ -55,7 +59,9 @@ const USAGE: &str = "usage: orbit-lab [--db PATH] [--lab DIR] <implementations|r
   measure WORKLOAD [--input-size N] [--warmup N] [--iterations N] [--seed N]
   compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]
   compare-runs --baseline ID,ID,... --candidate ID,ID,... [--threshold PERCENT] [--alpha A]
-  export ID --out FILE | validate FILE | import FILE | bundles [--limit N] | reproduce-bundle DIGEST";
+  export ID --out FILE | validate FILE [--trusted-keys F] | import FILE [--trusted-keys F]
+  bundles [--limit N] | reproduce-bundle DIGEST
+  keygen --key-id ID --out KEY [--public-out TRUSTED] | sign FILE --key KEY --out SIGNED";
 
 struct Args {
     db: PathBuf,
@@ -294,10 +300,15 @@ fn main_inner() -> Result<Value, String> {
         "validate" | "import" => {
             let file = args.rest.first().ok_or("a bundle file is required")?;
             let bytes = read_bounded(file)?;
+            let trust = option(&args.rest, "--trusted-keys")
+                .map(|f| {
+                    orbit_lab::signing::TrustStore::read(f.as_ref()).map_err(|e| e.to_string())
+                })
+                .transpose()?;
             if args.command == "validate" {
-                json(&orbit_lab::bundle::validate(&bytes).0)?
+                json(&orbit_lab::bundle::validate_with(&bytes, trust.as_ref()).0)?
             } else {
-                match lab.import_bundle(&bytes) {
+                match lab.import_bundle_with(&bytes, trust.as_ref()) {
                     Ok(outcome) => json(&outcome)?,
                     Err(orbit_lab::LabError::InvalidBundle(report)) => {
                         return Err(format!(
@@ -308,6 +319,37 @@ fn main_inner() -> Result<Value, String> {
                     Err(e) => return Err(e.to_string()),
                 }
             }
+        }
+        "keygen" => {
+            let key_id = option(&args.rest, "--key-id").ok_or("keygen needs --key-id ID")?;
+            let out = option(&args.rest, "--out").ok_or("keygen needs --out FILE")?;
+            let key =
+                orbit_lab::signing::SigningKeyFile::generate(key_id).map_err(|e| e.to_string())?;
+            key.write_new(out.as_ref())
+                .map_err(|e| format!("cannot write {out}: {e}"))?;
+            let public = key.public().map_err(|e| e.to_string())?;
+            if let Some(trusted) = option(&args.rest, "--public-out") {
+                let store = orbit_lab::signing::TrustStore::new(vec![public.clone()])
+                    .map_err(|e| e.to_string())?;
+                std::fs::write(
+                    trusted,
+                    serde_json::to_string_pretty(&store).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| format!("cannot write {trusted}: {e}"))?;
+            }
+            // The secret key is written only to the key file, never printed.
+            json!({ "key_file": out, "public": public })
+        }
+        "sign" => {
+            let file = args.rest.first().ok_or("a bundle file is required")?;
+            let key = option(&args.rest, "--key").ok_or("sign needs --key KEY")?;
+            let out = option(&args.rest, "--out").ok_or("sign needs --out FILE")?;
+            let key = orbit_lab::signing::SigningKeyFile::read(key.as_ref())
+                .map_err(|e| e.to_string())?;
+            let signed =
+                orbit_lab::bundle::sign(&read_bounded(file)?, &key).map_err(|e| e.to_string())?;
+            std::fs::write(out, &signed).map_err(|e| format!("cannot write {out}: {e}"))?;
+            json!({ "file": out, "key_id": key.key_id, "bytes": signed.len() })
         }
         "bundles" => {
             let limit = number(&args.rest, "--limit")?.unwrap_or(20);

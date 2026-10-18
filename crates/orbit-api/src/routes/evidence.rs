@@ -105,9 +105,12 @@ pub async fn validate_bundle(
     body: Bytes,
 ) -> Result<ApiJson<Value>, ApiError> {
     lab_handle(&state)?;
-    let report = tokio::task::spawn_blocking(move || orbit_lab::bundle::validate(&body).0)
-        .await
-        .map_err(|e| ApiError::internal(format!("validation task failed: {e}")))?;
+    let trust = state.trusted_keys.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        orbit_lab::bundle::validate_with(&body, trust.as_deref()).0
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("validation task failed: {e}")))?;
     Ok(ApiJson(json(&report)?))
 }
 
@@ -125,8 +128,9 @@ pub async fn import_bundle(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<(StatusCode, ApiJson<Value>), ApiError> {
+    let trust = state.trusted_keys.clone();
     with_lab(&state, move |lab, _| {
-        let outcome = lab.import_bundle(&body)?;
+        let outcome = lab.import_bundle_with(&body, trust.as_deref())?;
         let status = if outcome.newly_imported {
             StatusCode::CREATED
         } else {
