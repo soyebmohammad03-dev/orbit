@@ -6,6 +6,48 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Sprint 9: reliability laboratory
+
+- Reliability scenarios (`orbit_lab::reliability`), each with real child
+  processes:
+  - `event-append-interruption`: 12 cases;
+  - `snapshot-write-interruption`: 6 cases;
+  - `experiment-interruption`: 7 cases;
+  - `registry-concurrency`: 3 cases.
+
+  Results are stored as `reliability` experiments with per-case faults,
+  expected versus observed invariants, recovery and integrity details, and
+  verdicts (preserved, violated, inconclusive). Infrastructure failures fail
+  the experiment instead.
+- The `orbit-reliability` tool (feature `reliability`): `scenarios`, `run`,
+  `reproduce`. Reproduction compares case verdicts and never modifies the
+  original.
+- Lab fault points (`orbit_lab::fault`), only with the `reliability`
+  feature; `Lab::set_fault_hook`, `Lab::run_locked`,
+  `Lab::open_without_recovery`.
+- Temporary artifact files are locked while written. `Lab::open` removes
+  only those whose writer is gone.
+- Registry migration v3 (kind `reliability`; table rebuild with a
+  foreign-key check).
+- API: `GET /api/v1/lab/reliability/scenarios`, read-only. Creating a
+  `reliability` experiment through the API is rejected.
+- Observatory: reliability results (simulated versus real-process badges,
+  invariants table) and the scenario catalog.
+- CI: `orbit-api` must not contain the `reliability` feature, nor
+  reliability child code in its binary.
+- Tests:
+  - multi-process reliability tests;
+  - an API test showing that a timed-out experiment request still
+    completes;
+  - classification unit tests;
+  - component tests.
+- Docs: `docs/RELIABILITY.md`.
+
+### Changed — Sprint 9
+
+- Experiment summaries have optional `stream`, `left` and `right`, which are
+  absent for reliability experiments.
+
 ### Added — Sprint 8: divergence timeline and failure diagnosis
 
 - Differential replay results (`result_version` 2):

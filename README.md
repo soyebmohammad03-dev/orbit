@@ -168,6 +168,19 @@ state, diffs two of them, and names the events responsible for each change.
     implementations.
   - Sprint 7 records remain readable and reproducible (tested from a real
     fixture).
+- **Sprint 9: reliability laboratory** ([docs/RELIABILITY.md](docs/RELIABILITY.md)).
+  - Four scenarios: interrupted appends, interrupted snapshot writes,
+    interrupted lab experiments and artifact writes, and registry
+    concurrency.
+  - Failures are injected at named fault points, by real process aborts,
+    `SIGKILL`, paused live processes, and up to 8 concurrent OS processes.
+  - Results are stored as `reliability` experiments, with expected versus
+    observed invariants and verdicts (preserved, violated, inconclusive).
+    Infrastructure failures are kept separate.
+  - Fault injection stays out of the API, enforced by tests and CI.
+  - Registry migration v3; locked temporary artifact files, cleaned up only
+    when their writer is gone.
+  - Process crashes only: power loss is **not** simulated.
 - Design and limitations are in [docs/LAB.md](docs/LAB.md) and
   [ADR 0009](docs/adr/0009-orbit-lab-crate-and-registry.md).
 
@@ -408,6 +421,7 @@ The lab's own limitations are listed in [docs/LAB.md](docs/LAB.md#known-limitati
 | Sprint 6 | Audit and lab architecture ([ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md)) | **done** |
 | Sprint 7 | Experiment registry, implementation identity, differential replay ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
 | Sprint 8 | Divergence timeline, failure diagnosis, identity completeness, reproduction classes ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
+| Sprint 9 | Reliability scenarios, fault injection, multi-process registry safety ([RELIABILITY.md](docs/RELIABILITY.md)) | **done** (unreleased) |
 
 Evidence bundles and the reliability and performance labs are planned in [docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md) and not
 implemented.

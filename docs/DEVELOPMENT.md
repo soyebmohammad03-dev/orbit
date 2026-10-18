@@ -31,6 +31,7 @@ cargo run -p orbit-lab -- implementations     # lab: registered implementations
 cargo run -p orbit-lab -- run --stream S --left orbit.counter --right example.counter-floor-at-zero
 cargo run -p orbit-lab -- trace <id>          # per-boundary digests
 cargo run --release -p orbit-lab --example large_history -- 100000   # one large run, prints sizes and time
+cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run event-append-interruption   # see RELIABILITY.md
 ```
 
 The lab reads `data/orbit.db` and keeps its registry in `data/lab` (override
@@ -52,8 +53,9 @@ CI (`.github/workflows/ci.yml`) has three jobs:
 1. **Rust** (Ubuntu and macOS): everything below, for all three crates.
 2. **Web**: Prettier, ESLint with zero warnings, `tsc`, Vitest, and the
    production build.
-3. **End-to-end**: builds `orbit-api`, installs Chromium, and runs the
-   Playwright workflows against a fresh event store and lab registry.
+3. **End-to-end**: builds `orbit-api` and checks that the binary contains no
+   reliability child code, then installs Chromium and runs the Playwright
+   workflows against a fresh event store and lab registry.
 
 The Rust job runs, with `--locked`, on Ubuntu and macOS:
 
@@ -61,8 +63,8 @@ The Rust job runs, with `--locked`, on Ubuntu and macOS:
 - `clippy --all-targets --all-features`, plus `clippy --lib` with default
   features (the production build, without fault hooks);
 - `test` and `doc`;
-- a check that `orbit-api`'s feature graph does not contain
-  `orbit-core/fault-injection`;
+- a check that `orbit-api`'s feature graph contains neither
+  `orbit-core/fault-injection` nor `orbit-lab/reliability`;
 - `bench --no-run`, all three examples and `orbit-lab implementations`.
 
 On Ubuntu it also runs every benchmark once, in Criterion's `--test` mode. That
@@ -98,6 +100,8 @@ is a smoke test, not a measurement.
 | `orbit-lab` `tests/identity.rs` | Same name and version with different implementations, fingerprint stability under equivalent configuration, every identity field changing the fingerprint, the documented code-body limitation, id validation, duplicate ids, JSON round trip, spec digest canonicalization |
 | `orbit-lab` `tests/properties.rs` | Proptest: self-comparison is equivalent and its trace equals `ReplayLab::record`; the floor variant first diverges exactly where the counter first goes negative; for random histories, two variants and any window, every interval, convergence, count, trace entry and entry diff equals an independent reference (direct folds, `serde_json::Value` equality, a naive interval scan), and the result reproduces |
 | `orbit-lab` `tests/timeline.rs` | Divergence at the first and the final event, entry/exit diffs and convergence events, reference perspective, metadata keys without values, nested JSON with nulls, arrays and numbers (against the reference), a 3,000-event history with 300 intervals paged through the trace, trace windows and bounds, intervals stopped by failures, identity completeness, artifact write failures |
+| `orbit-lab` `tests/reliability.rs` | Every reliability scenario end to end with real child processes (aborts at each core and lab fault point, `SIGKILL`, a paused live owner, 4 processes creating, racing to start and racing to recover), persistence across reopen, reproduction without modifying the original, infrastructure failures (no child binary), v3 schema constraints, the `orbit-reliability` tool's validation, no active hook in ordinary runs |
+| `orbit-api` `tests/lab.rs` (Sprint 9 additions) | The reliability catalog is listed; `kind: reliability` is rejected; no route runs scenarios; a timed-out experiment request still completes |
 | `orbit-lab` `tests/reproduction.rs` | Reproduction: identical, changed result (`differs` with what changed), tampered spec and other comparison rules (`configuration_mismatch`), nondeterministic results, missing implementation, changed or short history, later appends; a real Sprint 7 registry fixture migrated, read, verified and reproduced |
 | `orbit-lab` `tests/cli.rs`  | The `orbit-lab` binary: implementations, run (flags and `--spec`), list, show, verify, reproduce, error exits |
 | `web/tests/unit`            | API client (URLs, bodies, error envelope, network errors, timing header), formatters, DiffView, ErrorState and EmptyState, navigation, the Overview page's loading, empty, data, error/retry and unrun-check states |

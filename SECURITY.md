@@ -29,6 +29,7 @@ affected commit.
   | Oversized or unbounded requests | Body limit, page-size and interval caps, replay cap, per-request deadline, SQLite busy timeout | `tests/api.rs`, `tests/hardening.rs` |
   | Information disclosure | No SQL or file paths from clients. Errors contain no local paths. Benchmark files are read only from the configured directory, never a client-supplied path, and symlinks are not followed. | `tests/hardening.rs`, `benchmarks.rs` tests |
 
+  | Fault injection reachable from the API | Fault hooks exist only with `orbit-core/fault-injection` and `orbit-lab/reliability`, which `orbit-api` never enables; reliability scenarios run only through the separately built `orbit-reliability` tool; the API rejects `kind: reliability` and has no route that injects faults; nothing reads environment variables to enable a hook | `orbit-api` `tests/lab.rs`; CI checks the API's feature graph and its binary |
   | Lab requests naming files | Experiment specs reject unknown fields; artifact paths are derived only from SHA-256 digests; the lab never writes to the event store, and its registry is a separate database | `orbit-lab` `tests/registry.rs`, `orbit-api` `tests/lab.rs` |
 
   These mitigations reduce the risk on a developer machine. They are not a

@@ -20,6 +20,11 @@ Audited state: `main` at `7cc2cae`, tag `v0.1.0`, on 2026-10-18.
 > - `ignore_paths` is not implemented;
 > - `rust-toolchain.toml` was not added.
 >
+> Sprint 9 implemented the reliability lab ([RELIABILITY.md](RELIABILITY.md)):
+> lab fault points behind the `reliability` feature, four scenarios with
+> child processes, results stored in the registry (migration v3), and the
+> CI feature-isolation check planned here.
+>
 > Sprint 8, as redefined by its brief, delivered the divergence timeline,
 > diagnosis, identity completeness and reproduction classes instead of
 > evidence bundles. Evidence bundles and everything after them are still a

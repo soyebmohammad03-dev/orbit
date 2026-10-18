@@ -66,7 +66,7 @@ Change it with `--lab` or `ORBIT_LAB_DIR`. `data/` is git-ignored.
 
 ## Registry
 
-### Schema (version 2)
+### Schema (version 3)
 
 | Table | Purpose |
 |-------|---------|
@@ -97,8 +97,9 @@ transaction:
 |---------|--------|--------|
 | 1 | 7 | Tables, triggers and constraints above |
 | 2 | 8 | Adds `experiments.executable_digest` and adds it to the immutable identity columns (the trigger is recreated). Existing rows keep `NULL`. |
+| 3 | 9 | Adds the kind `reliability` ([RELIABILITY.md](RELIABILITY.md)). For it, `stream_id`, `left_impl`, `right_impl` and the completed `input` are optional; differential replays still require them (a `CHECK`). SQLite cannot alter a `CHECK`, so `experiments` is rebuilt: triggers are dropped, rows copied, triggers recreated unchanged. Migrations run with foreign keys off, followed by `PRAGMA foreign_key_check`; any violation refuses to open. |
 
-Sprint 7 registries open unchanged in content. A test loads a real Sprint 7
+Sprint 7 registries open unchanged in content (v1 → v2 → v3). A test loads a real Sprint 7
 registry, event store and artifacts (`tests/fixtures/sprint7/`, dumped from
 commit `a44e62f`), migrates it, reads every record, verifies its artifacts and
 reproduces its experiments.
@@ -165,8 +166,18 @@ A partially executed experiment is never marked `completed`.
 **Concurrency.** Several `Registry` values, in one process or several, may
 use one `lab.db`. Writes use `BEGIN IMMEDIATE` and wait up to 5 s for the
 lock. A test runs four registries, each with its own connection, in parallel
-threads, writing 100 experiments with no lost writes. Multiple processes are
-not tested separately.
+threads, writing 100 experiments with no lost writes. Since Sprint 9 the
+`registry-concurrency` reliability scenario also tests separate OS processes
+(up to 8 × 25 experiments), racing starts and racing recoveries; see
+[RELIABILITY.md](RELIABILITY.md#registry-concurrency-guarantees).
+
+**Lab fault points.** `run_after_start`, `run_after_execute`,
+`artifact_after_partial_write` and `run_before_complete`
+(`crates/orbit-lab/src/fault.rs`) can be acted on only with the `reliability`
+feature, which `orbit-api` never enables. `Lab::run_locked` holds the
+lifecycle, lock and fault points for every experiment kind.
+`Lab::open_without_recovery` opens without recovering, for tools that need
+to observe recovery.
 
 ## Implementation identity
 
@@ -485,7 +496,10 @@ independent of the original store is a history artifact: a copy of events
 - Paths are derived only from a digest, never from request input. No API or
   spec field names a file.
 - Writes go to `tmp/`, are `fsync`ed and then renamed into place. A later
-  write of the same bytes replaces a damaged file.
+  write of the same bytes replaces a damaged file. Each temporary file is
+  locked by its writer until it is renamed. `Lab::open` deletes temporary
+  files whose lock it can take, which belong to interrupted writers, and
+  keeps live ones.
 - Every read re-hashes the content and refuses a mismatch. Symbolic links are
   treated as missing and never followed.
 - Records and API responses contain digests, sizes and media types. They
