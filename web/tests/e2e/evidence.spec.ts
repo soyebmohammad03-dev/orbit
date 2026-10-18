@@ -97,4 +97,10 @@ test("export, validate, import and reproduce an evidence bundle", async ({ page,
     await expect(page.getByRole("list", { name: "Validation errors" })).toContainText("digest_mismatch");
     const list = await (await request.get(`${API}/lab/bundles`)).json();
     expect(list.bundles).toHaveLength(1);
+
+    // The Evidence page, with a bundle open, fits a phone-width screen.
+    await page.setViewportSize({ width: 375, height: 800 });
+    await expect(page.getByRole("list", { name: "Bundle entries" })).toBeVisible();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
 });

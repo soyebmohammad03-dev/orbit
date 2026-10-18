@@ -169,7 +169,7 @@ export function ErrorState({
 
 export function Digest({ value, full = false }: { value: string; full?: boolean }) {
     return (
-        <code title={value} className="whitespace-nowrap font-mono text-xs text-muted">
+        <code title={value} className={cx("font-mono text-xs text-muted", full ? "break-all" : "whitespace-nowrap")}>
             {full ? value : shortDigest(value)}
         </code>
     );
