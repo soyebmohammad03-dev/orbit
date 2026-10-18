@@ -97,10 +97,14 @@ pub enum Role {
 /// The stream every scenario uses.
 pub const STREAM: &str = "reliability";
 
+/// Writes one line to the parent. If the parent is gone (its end of the
+/// pipe is closed), this child exits instead of running on unobserved:
+/// otherwise a continuously appending child would outlive a killed runner.
 fn say(line: &str) {
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
+    if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+        std::process::exit(4);
+    }
 }
 
 fn wait_for_parent() {

@@ -405,3 +405,43 @@ fn ordinary_lab_runs_have_no_active_fault_hook() {
         .unwrap();
     assert_eq!(record.status, Status::Completed);
 }
+
+/// Regression: a child that appends continuously must not outlive its
+/// parent. Closing its stdout pipe (as a killed runner would) makes it exit.
+#[test]
+fn a_child_exits_when_its_parent_stops_reading() {
+    use std::io::{BufRead, BufReader};
+    let env = Env::new();
+    {
+        let store = env.store();
+        store
+            .create_stream(&common::sid("reliability"), orbit_core::Metadata::new())
+            .unwrap();
+    }
+    let role = json!({ "role": "append_forever", "db": env.db });
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_orbit-reliability"))
+        .arg("__child")
+        .arg(role.to_string())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert!(line.starts_with("committed "), "{line}");
+    drop(out);
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the child kept running after its parent stopped reading"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(4));
+}

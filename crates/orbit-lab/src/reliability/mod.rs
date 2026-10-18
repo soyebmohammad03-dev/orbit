@@ -38,6 +38,7 @@ use crate::{ExperimentRecord, Lab};
 
 #[cfg(feature = "reliability")]
 pub mod child;
+pub mod launcher;
 #[cfg(feature = "reliability")]
 pub mod runner;
 
