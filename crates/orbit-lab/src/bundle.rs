@@ -1118,19 +1118,7 @@ impl Lab {
                             Ok(new) => {
                                 let comparison =
                                     performance::compare::compare(&recorded, &new, policy);
-                                let status = match comparison.verdict {
-                                    performance::Verdict::WithinThreshold => {
-                                        ReproductionStatus::Reproduced
-                                    }
-                                    performance::Verdict::Regression
-                                    | performance::Verdict::Improvement => {
-                                        ReproductionStatus::Differs
-                                    }
-                                    performance::Verdict::Incompatible => {
-                                        ReproductionStatus::ConfigurationMismatch
-                                    }
-                                    _ => ReproductionStatus::Inconclusive,
-                                };
+                                let status = performance::reproduction_status(comparison.verdict);
                                 (
                                     status,
                                     json!({ "compared": "a new local measurement of the bundled specification", "attempt_experiment_id": attempt.id, "comparison": comparison }),

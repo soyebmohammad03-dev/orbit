@@ -700,21 +700,49 @@ impl Lab {
         id: ExperimentId,
         policy: &RegressionPolicy,
     ) -> Result<(VerificationRecord, ExperimentRecord)> {
+        match self.prepare_performance_reproduction(id)? {
+            Ok(attempt) => self.finish_performance_reproduction(id, attempt.id, policy),
+            Err(verification) => Ok((verification, self.experiment(id)?)),
+        }
+    }
+
+    /// First half of [`reproduce_performance`](Self::reproduce_performance):
+    /// records the linked attempt (status `created`) without running it.
+    /// If the original's spec can no longer be read, appends a
+    /// `configuration_mismatch` verification instead and returns it as `Err`.
+    ///
+    /// # Errors
+    /// [`LabError::InvalidState`] unless a completed performance experiment.
+    pub fn prepare_performance_reproduction(
+        &self,
+        id: ExperimentId,
+    ) -> Result<std::result::Result<ExperimentRecord, VerificationRecord>> {
         let original = self.experiment(id)?;
-        let recorded = result_of(&original)?;
-        let spec = match record_spec(&original) {
-            Ok((spec, _)) => spec,
-            Err(e) => {
-                let v = self.registry().add_verification(
-                    id,
-                    VerificationKind::Reproduction,
-                    ReproductionStatus::ConfigurationMismatch.as_str(),
-                    &json!({ "reason": e.to_string() }),
-                )?;
-                return Ok((v, original));
-            }
-        };
-        let attempt = self.measure_performance(&spec)?;
+        result_of(&original)?;
+        match record_spec(&original) {
+            Ok((spec, _)) => Ok(Ok(self.create_performance(&spec)?)),
+            Err(e) => Ok(Err(self.registry().add_verification(
+                id,
+                VerificationKind::Reproduction,
+                ReproductionStatus::ConfigurationMismatch.as_str(),
+                &json!({ "reason": e.to_string() }),
+            )?)),
+        }
+    }
+
+    /// Second half: runs the attempt, compares it with the original and
+    /// appends the verification to the original.
+    ///
+    /// # Errors
+    /// [`LabError::InvalidState`] if either is not a performance experiment.
+    pub fn finish_performance_reproduction(
+        &self,
+        id: ExperimentId,
+        attempt: ExperimentId,
+        policy: &RegressionPolicy,
+    ) -> Result<(VerificationRecord, ExperimentRecord)> {
+        let recorded = result_of(&self.experiment(id)?)?;
+        let attempt = self.run_performance(attempt)?;
         let (status, detail) = match result_of(&attempt) {
             Err(_) => (
                 ReproductionStatus::NotReproducible,
@@ -726,16 +754,8 @@ impl Lab {
             ),
             Ok(new) => {
                 let comparison = compare::compare(&recorded, &new, policy);
-                let status = match comparison.verdict {
-                    Verdict::WithinThreshold => ReproductionStatus::Reproduced,
-                    Verdict::Regression | Verdict::Improvement => ReproductionStatus::Differs,
-                    Verdict::Incompatible => ReproductionStatus::ConfigurationMismatch,
-                    Verdict::SuspectedRegression
-                    | Verdict::SuspectedImprovement
-                    | Verdict::InsufficientSamples => ReproductionStatus::Inconclusive,
-                };
                 (
-                    status,
+                    reproduction_status(comparison.verdict),
                     json!({
                         "compared": "a new measurement of the same specification",
                         "attempt_experiment_id": attempt.id,
@@ -751,6 +771,19 @@ impl Lab {
             &detail,
         )?;
         Ok((v, attempt))
+    }
+}
+
+/// How a comparison verdict classifies a reproduction attempt.
+#[must_use]
+pub fn reproduction_status(verdict: Verdict) -> ReproductionStatus {
+    match verdict {
+        Verdict::WithinThreshold => ReproductionStatus::Reproduced,
+        Verdict::Regression | Verdict::Improvement => ReproductionStatus::Differs,
+        Verdict::Incompatible => ReproductionStatus::ConfigurationMismatch,
+        Verdict::SuspectedRegression
+        | Verdict::SuspectedImprovement
+        | Verdict::InsufficientSamples => ReproductionStatus::Inconclusive,
     }
 }
 

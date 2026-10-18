@@ -1,6 +1,7 @@
 //! HTTP handlers. Each handler validates its input, runs the engine call on
 //! the blocking thread pool, and maps the result to a DTO.
 
+pub mod evidence;
 pub mod integrity;
 pub mod lab;
 pub mod replay;

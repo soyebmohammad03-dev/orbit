@@ -99,6 +99,27 @@ impl TestApi {
         (status, value)
     }
 
+    /// Sends raw bytes; returns status, headers and the raw body.
+    pub async fn send_raw(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:7878")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes.to_vec())
+    }
+
     pub async fn get(&self, uri: &str) -> (StatusCode, Value) {
         self.send("GET", uri, None).await
     }

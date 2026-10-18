@@ -51,6 +51,9 @@ pub struct AppState {
     pub request_timeout: Duration,
     /// The experiment lab, if enabled. Its registry is a separate database.
     pub lab: Option<Arc<orbit_lab::Lab>>,
+    /// Set while a performance measurement runs in the background; at most
+    /// one runs at a time (see `routes::lab`).
+    pub measuring: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -72,6 +75,7 @@ impl AppState {
             ),
             request_timeout: config::DEFAULT_REQUEST_TIMEOUT,
             lab: None,
+            measuring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -172,7 +176,7 @@ async fn timing(request: Request, next: Next) -> Response {
 /// Builds the router. `cors_origins` are the browser origins allowed to call
 /// the API (exact matches only).
 pub fn router(state: AppState, cors_origins: &[String]) -> Router {
-    use routes::{integrity, lab, replay, snapshots, state as st, streams, system};
+    use routes::{evidence, integrity, lab, replay, snapshots, state as st, streams, system};
     let origins: Vec<HeaderValue> = cors_origins
         .iter()
         .filter_map(|o| HeaderValue::from_str(o).ok())
@@ -184,6 +188,8 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
         .expose_headers([
             header::HeaderName::from_static("x-orbit-elapsed-micros"),
             header::HeaderName::from_static("server-timing"),
+            header::HeaderName::from_static("x-orbit-bundle-digest"),
+            header::CONTENT_DISPOSITION,
         ]);
     let body_limit = state.max_body_bytes;
 
@@ -252,8 +258,33 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
             get(lab::get_trace),
         )
         .route(
+            "/lab/experiments/{experiment_id}/bundle",
+            get(evidence::export_bundle),
+        )
+        .route(
             "/lab/reliability/scenarios",
             get(lab::list_reliability_scenarios),
+        )
+        .route(
+            "/lab/performance/workloads",
+            get(lab::list_performance_workloads),
+        )
+        .route("/lab/performance/compare", post(lab::compare_performance))
+        .route(
+            "/lab/bundles",
+            get(evidence::list_bundles)
+                .post(evidence::import_bundle)
+                .layer(DefaultBodyLimit::max(orbit_lab::bundle::MAX_BUNDLE_BYTES)),
+        )
+        .route(
+            "/lab/bundles/validate",
+            post(evidence::validate_bundle)
+                .layer(DefaultBodyLimit::max(orbit_lab::bundle::MAX_BUNDLE_BYTES)),
+        )
+        .route("/lab/bundles/{bundle_digest}", get(evidence::get_bundle))
+        .route(
+            "/lab/bundles/{bundle_digest}/reproduce",
+            post(evidence::reproduce_bundle),
         )
         .fallback(|| async {
             error::ApiError::not_found(

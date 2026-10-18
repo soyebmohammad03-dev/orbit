@@ -2,7 +2,7 @@
 
 use utoipa::OpenApi;
 
-use crate::routes::{integrity, lab, replay, snapshots, state, streams, system};
+use crate::routes::{evidence, integrity, lab, replay, snapshots, state, streams, system};
 
 /// OpenAPI description of `/api/v1`.
 #[derive(OpenApi)]
@@ -23,6 +23,9 @@ use crate::routes::{integrity, lab, replay, snapshots, state, streams, system};
         replay::list_runs, replay::create_run, replay::get_run, replay::execute_run, replay::run_experiment,
         lab::list_implementations, lab::list_experiments, lab::create_experiment, lab::get_experiment,
         lab::verify_experiment, lab::reproduce_experiment, lab::get_trace, lab::list_reliability_scenarios,
+        lab::list_performance_workloads, lab::compare_performance,
+        evidence::export_bundle, evidence::validate_bundle, evidence::import_bundle,
+        evidence::list_bundles, evidence::get_bundle, evidence::reproduce_bundle,
     ),
     tags(
         (name = "system", description = "Health, capabilities, overview, benchmarks"),
@@ -32,7 +35,7 @@ use crate::routes::{integrity, lab, replay, snapshots, state, streams, system};
         (name = "snapshots", description = "Snapshot creation and validation"),
         (name = "integrity", description = "Verification and checkpoints"),
         (name = "replay", description = "Replay runs, executions, experiments"),
-        (name = "lab", description = "Experiment registry and differential replay (orbit-lab)"),
+        (name = "lab", description = "Experiment registry: differential replay, performance, reliability results, evidence bundles (orbit-lab)"),
     )
 )]
 pub struct ApiDoc;

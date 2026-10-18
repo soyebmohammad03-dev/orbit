@@ -536,12 +536,52 @@ pub struct BenchmarksResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateExperimentRequest {
-    /// Experiment kind. Only `differential_replay` exists.
+    /// Experiment kind: `differential_replay` (run to completion within the
+    /// request) or `performance` (accepted and measured in the background).
+    /// `reliability` is refused (see docs/RELIABILITY.md).
     pub kind: String,
-    /// The specification: `stream`, `left`, `right`, and optionally `from`,
-    /// `to`, `reference` (`left` or `right`) and `determinism_check`.
+    /// The specification. Differential replay: `stream`, `left`, `right`,
+    /// and optionally `from`, `to`, `reference` (`left` or `right`) and
+    /// `determinism_check`. Performance: `workload`, and optionally
+    /// `input_size`, `warmup_iterations`, `measured_iterations`, `seed`.
     #[schema(value_type = Object)]
     pub spec: Value,
+}
+
+/// Body of `POST /api/v1/lab/performance/compare`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompareRequest {
+    /// Baseline experiment id. Omitted: the newest earlier completed
+    /// performance experiment with the same configuration and a compatible
+    /// environment (`status` is `no_baseline` if there is none).
+    pub baseline: Option<String>,
+    /// Candidate experiment ids (1–10).
+    pub candidates: Vec<String>,
+    /// Smallest relative change of the median that counts, in percent
+    /// (0.1–100, default 10).
+    pub threshold_percent: Option<f64>,
+    /// Significance level of the Mann–Whitney test (0.0001–0.1, default 0.01).
+    pub alpha: Option<f64>,
+}
+
+/// Query of `GET /api/v1/lab/bundles`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct BundlePageQuery {
+    /// Return bundles imported before this cursor (`next_before` of the previous page).
+    pub before: Option<i64>,
+    /// Page size, 1–500 (default 50).
+    pub limit: Option<usize>,
+}
+
+/// Query of `GET /api/v1/lab/experiments/{id}/bundle`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ExportQuery {
+    /// Include the input event history when the store still holds it
+    /// (differential replays; default `true`).
+    pub history: Option<bool>,
 }
 
 /// Query of `GET /api/v1/lab/experiments`.
@@ -550,6 +590,8 @@ pub struct CreateExperimentRequest {
 pub struct ExperimentPageQuery {
     /// Return experiments created before this one (an experiment id).
     pub before: Option<String>,
+    /// Only this kind (`differential_replay`, `reliability` or `performance`).
+    pub kind: Option<String>,
     /// Page size, 1–500 (default 50).
     pub limit: Option<usize>,
 }

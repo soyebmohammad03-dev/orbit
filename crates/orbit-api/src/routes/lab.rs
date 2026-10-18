@@ -3,17 +3,19 @@
 //! database; these handlers never write to the event store.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use orbit_lab::performance::{self, PerformanceSpec, RegressionPolicy};
 use orbit_lab::{DifferentialSpec, ExperimentId, Lab};
 use serde_json::Value;
 
 use super::page_limit;
 use crate::AppState;
 use crate::dto::{
-    ArtifactVerificationResponse, CreateExperimentRequest, ExperimentDetail, ExperimentPage,
-    ExperimentPageQuery, ImplementationList, TraceQuery,
+    ArtifactVerificationResponse, CompareRequest, CreateExperimentRequest, ExperimentDetail,
+    ExperimentPage, ExperimentPageQuery, ImplementationList, TraceQuery,
 };
 use crate::error::{ApiError, ErrorResponse};
 use crate::extract::{ApiJson, ApiPath, ApiQuery};
@@ -27,6 +29,65 @@ fn lab(state: &AppState) -> Result<Arc<Lab>, ApiError> {
         class: None,
         details: Value::Null,
     })
+}
+
+pub(crate) fn lab_handle(state: &AppState) -> Result<Arc<Lab>, ApiError> {
+    lab(state)
+}
+
+/// Clears the `measuring` flag when the background work ends, however it ends.
+struct Measuring(Arc<AtomicBool>);
+
+impl Drop for Measuring {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Runs `prepare` on the blocking pool and then `work` on its own thread,
+/// with at most one such job at a time per server: a performance
+/// measurement must not compete with another one, and the number of
+/// threads stays bounded. A second request gets 409 `measurement_in_progress`.
+///
+/// The job is not cancellable. If the server stops while it runs, the
+/// experiment is left `running` and marked `failed`/`interrupted` when the
+/// lab is next opened.
+pub(crate) async fn in_background<T, P, W>(
+    state: &AppState,
+    prepare: P,
+    work: W,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    P: FnOnce(&Lab) -> Result<(T, Option<orbit_lab::ExperimentId>), ApiError> + Send + 'static,
+    W: FnOnce(&Lab, Option<orbit_lab::ExperimentId>) + Send + 'static,
+{
+    let lab = lab(state)?;
+    if state.measuring.swap(true, Ordering::SeqCst) {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "measurement_in_progress",
+            message: "a performance measurement is already running on this server; wait for it to finish (one runs at a time)".to_owned(),
+            class: Some(orbit_core::ErrorClass::Retryable),
+            details: Value::Null,
+        });
+    }
+    let guard = Measuring(Arc::clone(&state.measuring));
+    let prepared = {
+        let lab = Arc::clone(&lab);
+        tokio::task::spawn_blocking(move || prepare(&lab))
+            .await
+            .map_err(|e| ApiError::internal(format!("lab task failed: {e}")))?
+    };
+    let (value, id) = prepared?;
+    std::thread::Builder::new()
+        .name("orbit-measurement".to_owned())
+        .spawn(move || {
+            let _guard = guard;
+            work(&lab, id);
+        })
+        .map_err(|e| ApiError::internal(format!("cannot start the measurement: {e}")))?;
+    Ok(value)
 }
 
 fn experiment_id(raw: &str) -> Result<ExperimentId, ApiError> {
@@ -81,8 +142,22 @@ pub async fn list_experiments(
 ) -> Result<ApiJson<ExperimentPage>, ApiError> {
     let limit = page_limit(query.limit)?;
     let before = query.before.as_deref().map(experiment_id).transpose()?;
+    let kinds = [
+        orbit_lab::spec::DIFFERENTIAL_REPLAY,
+        orbit_lab::reliability::RELIABILITY,
+        performance::PERFORMANCE,
+    ];
+    let kind = match query.kind.as_deref() {
+        None => None,
+        Some(k) => Some(*kinds.iter().find(|x| **x == k).ok_or_else(|| {
+            ApiError::bad_request(
+                "invalid_parameter",
+                format!("kind must be one of {}", kinds.join(", ")),
+            )
+        })?),
+    };
     with_lab(&state, move |lab, _| {
-        let mut rows = lab.list(limit + 1, before)?;
+        let mut rows = lab.registry().list_kind(limit + 1, before, kind)?;
         let more = rows.len() > limit;
         rows.truncate(limit);
         let next_before = if more {
@@ -98,21 +173,50 @@ pub async fn list_experiments(
     .await
 }
 
-/// Creates a differential replay experiment and runs it to completion.
+/// Creates an experiment and runs it.
 ///
-/// Responds 201 with the stored experiment. Its `status` is `completed`
-/// (with a result, which may report a divergence or an implementation
-/// failure) or `failed` (the input history was unavailable or damaged).
-/// The run is synchronous; if it outlasts the request deadline the response
-/// is 503 `request_timeout`, but the experiment still finishes in the registry.
+/// - `differential_replay`: runs to completion within the request and
+///   responds 201 with the stored experiment, `completed` (with a result,
+///   which may report a divergence or an implementation failure) or
+///   `failed` (the input history was unavailable or damaged). If it
+///   outlasts the request deadline the response is 503 `request_timeout`,
+///   but the experiment still finishes in the registry.
+/// - `performance`: responds 202 with the experiment in status `created`
+///   and measures it in the background; poll `GET /lab/experiments/{id}`
+///   until it is `completed` or `failed`. One measurement runs at a time
+///   (409 `measurement_in_progress` otherwise). It cannot be cancelled.
+/// - `reliability`: refused with 400 (fault injection is not available here).
 #[utoipa::path(post, path = "/api/v1/lab/experiments", tag = "lab",
     request_body = CreateExperimentRequest,
-    responses((status = 201, description = "The stored experiment", body = Object),
-              (status = 400, body = ErrorResponse), (status = 503, body = ErrorResponse)))]
+    responses((status = 201, description = "The stored differential replay", body = Object),
+              (status = 202, description = "The accepted performance experiment (status created)", body = Object),
+              (status = 400, body = ErrorResponse), (status = 409, body = ErrorResponse),
+              (status = 503, body = ErrorResponse)))]
 pub async fn create_experiment(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<CreateExperimentRequest>,
 ) -> Result<(StatusCode, ApiJson<Value>), ApiError> {
+    if body.kind == performance::PERFORMANCE {
+        let spec = PerformanceSpec::from_json(body.spec)?;
+        spec.validated()?;
+        let record = in_background(
+            &state,
+            move |lab| {
+                let record = lab.create_performance(&spec)?;
+                let id = record.id;
+                Ok((json(&record)?, Some(id)))
+            },
+            |lab, id| {
+                if let Some(id) = id
+                    && let Err(e) = lab.run_performance(id)
+                {
+                    tracing::error!(%id, error = %e, "performance measurement could not be recorded");
+                }
+            },
+        )
+        .await?;
+        return Ok((StatusCode::ACCEPTED, ApiJson(record)));
+    }
     if body.kind == orbit_lab::reliability::RELIABILITY {
         return Err(ApiError::bad_request(
             "unsupported_experiment_kind",
@@ -124,7 +228,7 @@ pub async fn create_experiment(
         return Err(ApiError::bad_request(
             "unsupported_experiment_kind",
             format!(
-                "experiment kind {:?} is not supported; use \"differential_replay\"",
+                "experiment kind {:?} is not supported; use \"differential_replay\" or \"performance\"",
                 body.kind
             ),
         ));
@@ -183,20 +287,57 @@ pub async fn verify_experiment(
     .await
 }
 
-/// Executes a completed experiment again from its persisted specification
-/// and compares results. The outcome (`reproduced`, `differs`,
-/// `history_changed`, `history_unavailable`, `implementation_unavailable`)
-/// is recorded and returned.
+/// Reproduces a completed experiment; the original is never modified.
+///
+/// - Differential replay: executed again from its persisted specification
+///   and compared; responds 201 with the stored verification record
+///   (`status` is a reproduction status such as `reproduced`, `differs`,
+///   `history_changed`, `history_unavailable`, `implementation_unavailable`,
+///   `artifact_missing` or `configuration_mismatch`).
+/// - Performance: responds 202 with the linked new experiment (status
+///   `created`), measured in the background; when it finishes, a
+///   verification naming it is appended to the original. Same one-at-a-time
+///   rule as creating a performance experiment.
+/// - Reliability: 409 (reproduced only with the orbit-reliability tool).
 #[utoipa::path(post, path = "/api/v1/lab/experiments/{experiment_id}/reproduce", tag = "lab",
     params(("experiment_id" = String, Path, description = "Experiment id (UUID)")),
     responses((status = 201, description = "The stored verification record", body = Object),
+              (status = 202, description = "The linked performance attempt (status created)", body = Object),
               (status = 404, body = ErrorResponse),
-              (status = 409, description = "The experiment is not completed", body = ErrorResponse)))]
+              (status = 409, description = "The experiment is not completed, or a measurement is running", body = ErrorResponse)))]
 pub async fn reproduce_experiment(
     State(state): State<AppState>,
     ApiPath(raw): ApiPath<String>,
 ) -> Result<(StatusCode, ApiJson<Value>), ApiError> {
     let id = experiment_id(&raw)?;
+    let kind = with_lab(&state, move |lab, _| Ok(lab.experiment(id)?.kind)).await?;
+    if kind == performance::PERFORMANCE {
+        let value = in_background(
+            &state,
+            move |lab| match lab.prepare_performance_reproduction(id)? {
+                Ok(attempt) => Ok((json(&attempt)?, Some(attempt.id))),
+                Err(verification) => Ok((json(&verification)?, None)),
+            },
+            move |lab, attempt| {
+                if let Some(attempt) = attempt
+                    && let Err(e) = lab.finish_performance_reproduction(
+                        id,
+                        attempt,
+                        &RegressionPolicy::default(),
+                    )
+                {
+                    tracing::error!(%id, error = %e, "performance reproduction could not be recorded");
+                }
+            },
+        )
+        .await?;
+        let status = if value.get("detail").is_some() {
+            StatusCode::CREATED
+        } else {
+            StatusCode::ACCEPTED
+        };
+        return Ok((status, ApiJson(value)));
+    }
     with_lab(&state, move |lab, store| {
         let verification = lab.reproduce(id, store)?;
         Ok((StatusCode::CREATED, ApiJson(json(&verification)?)))
@@ -238,4 +379,68 @@ pub async fn list_reliability_scenarios(
         "scenarios": orbit_lab::reliability::SCENARIOS,
         "execution": "orbit-reliability tool only (cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run <scenario>)",
     })))
+}
+
+/// The performance workloads, their bounds and the default regression policy.
+#[utoipa::path(get, path = "/api/v1/lab/performance/workloads", tag = "lab",
+    responses((status = 200, description = "Workload catalog", body = Object), (status = 503, body = ErrorResponse)))]
+pub async fn list_performance_workloads(
+    State(state): State<AppState>,
+) -> Result<ApiJson<Value>, ApiError> {
+    lab(&state)?;
+    Ok(ApiJson(serde_json::json!({
+        "workloads": performance::WORKLOADS,
+        "warmup_iterations": performance::WARMUP,
+        "measured_iterations": performance::MEASURED,
+        "min_measurement_samples": performance::MIN_MEASUREMENT_SAMPLES,
+        "default_policy": RegressionPolicy::default(),
+        "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "measuring": state.measuring.load(Ordering::SeqCst),
+    })))
+}
+
+/// Most candidates in one comparison.
+pub const MAX_CANDIDATES: usize = 10;
+
+/// Compares completed performance experiments against a baseline. Nothing
+/// is stored. Each comparison reports a verdict (`incompatible`,
+/// `insufficient_samples`, `within_threshold`, `suspected_regression`,
+/// `suspected_improvement`, `regression`, `improvement`), the absolute and
+/// relative change of the median, both median intervals and the test.
+#[utoipa::path(post, path = "/api/v1/lab/performance/compare", tag = "lab",
+    request_body = CompareRequest,
+    responses((status = 200, description = "Comparisons, or status no_baseline", body = Object),
+              (status = 400, body = ErrorResponse), (status = 404, body = ErrorResponse),
+              (status = 409, description = "Not a completed performance experiment", body = ErrorResponse)))]
+pub async fn compare_performance(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<CompareRequest>,
+) -> Result<ApiJson<Value>, ApiError> {
+    if body.candidates.is_empty() || body.candidates.len() > MAX_CANDIDATES {
+        return Err(ApiError::bad_request(
+            "invalid_parameter",
+            format!("candidates must hold 1 to {MAX_CANDIDATES} experiment ids"),
+        ));
+    }
+    let candidates = body
+        .candidates
+        .iter()
+        .map(|c| experiment_id(c))
+        .collect::<Result<Vec<_>, _>>()?;
+    let baseline = body.baseline.as_deref().map(experiment_id).transpose()?;
+    let defaults = RegressionPolicy::default();
+    let policy = RegressionPolicy {
+        threshold_percent: body.threshold_percent.unwrap_or(defaults.threshold_percent),
+        alpha: body.alpha.unwrap_or(defaults.alpha),
+    }
+    .validated()
+    .map_err(|e| ApiError::bad_request("invalid_parameter", e))?;
+    with_lab(&state, move |lab, _| {
+        Ok(ApiJson(lab.compare_performance(
+            baseline,
+            &candidates,
+            &policy,
+        )?))
+    })
+    .await
 }
