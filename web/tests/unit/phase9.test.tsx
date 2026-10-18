@@ -89,7 +89,7 @@ function record(result: PerformanceResult | null, over: Partial<ExperimentRecord
 describe("performance results", () => {
     it("labels smoke runs and shows only the statistics that were computed", () => {
         render(<PerformanceSummary record={record(perfResult())} />);
-        expect(screen.getByText("Smoke run (not a measurement)")).toBeInTheDocument();
+        expect(screen.getByText("Smoke run")).toBeInTheDocument();
         expect(screen.getByRole("note")).toHaveTextContent("It shows that the workload runs, not how fast it is.");
         const table = screen.getByRole("table", { name: "Statistics" });
         expect(within(table).getByText("Samples").nextSibling).toHaveTextContent("3");

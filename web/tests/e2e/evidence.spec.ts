@@ -21,7 +21,7 @@ test("measure, compare and inspect a performance workload", async ({ page }) => 
     const table = page.getByRole("table", { name: "Performance experiments" });
     await expect(table.getByRole("row")).toHaveCount(3);
     // The e2e API is a debug build, so both are smoke runs.
-    await expect(table.getByText("Smoke run (not a measurement)")).toHaveCount(2, { timeout: 30_000 });
+    await expect(table.getByText("Smoke run")).toHaveCount(2, { timeout: 30_000 });
 
     const boxes = table.getByRole("checkbox");
     await boxes.first().check();

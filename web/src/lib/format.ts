@@ -98,7 +98,7 @@ export const LAB_OUTCOME_LABELS: Record<string, string> = {
     invariants_preserved: "Invariants preserved",
     invariant_violated: "Invariant violated",
     inconclusive: "Inconclusive",
-    smoke: "Smoke run (not a measurement)",
+    smoke: "Smoke run",
     measurement: "Measurement",
 };
 
