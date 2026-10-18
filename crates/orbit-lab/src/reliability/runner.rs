@@ -38,6 +38,7 @@ use crate::registry::{
     ArtifactRef, Completion, ExperimentId, Failure, FailureKind, Status, VerificationKind,
     VerificationRecord,
 };
+use crate::reproduction::ReproductionStatus;
 use crate::{Catalog, DifferentialSpec, ExperimentRecord, Lab};
 
 /// A child process is killed if it has not exited after this long.
@@ -977,6 +978,85 @@ fn experiment_interruption(ctx: &mut Ctx, n: u64) -> Infallible<Vec<CaseResult>>
         ));
     }
 
+    // The creator of an experiment dies before starting it.
+    {
+        let id = "experiment_created/process_killed".to_owned();
+        let mut child = ctx.spawn(&json!({ "role": "create_and_wait", "lab": lab_dir }))?;
+        let created: Option<ExperimentId> = child
+            .line()
+            .and_then(|l| l.strip_prefix("created ").and_then(|i| i.parse().ok()));
+        let Some(created) = created else {
+            child.kill();
+            let _ = child.finish(ctx, &id);
+            return Err(Infra(
+                "the creating child did not report an experiment".into(),
+            ));
+        };
+        let mut checks = Vec::new();
+        // Another process opens the lab (and recovers) while the creator lives.
+        let observer = Lab::open(&lab_dir, Catalog::builtin())?;
+        let alive = observer.experiment(created)?.status;
+        checks.push(InvariantCheck::new(
+            "live_creator_not_abandoned",
+            "still created while its creator is alive",
+            alive.to_string(),
+            alive == Status::Created,
+        ));
+        child.kill();
+        let (status, _) = child.finish(ctx, &id)?;
+        let (_, killed, how) = ended(status);
+        let reopened = Lab::open(&lab_dir, Catalog::builtin())?;
+        let record = reopened.experiment(created)?;
+        checks.push(InvariantCheck::new(
+            "abandoned_after_creator_died",
+            "failed/abandoned, without a result or artifact links",
+            format!(
+                "{} {:?} links: {}",
+                record.status,
+                record.failure.as_ref().map(|f| f.kind),
+                record.artifacts.len()
+            ),
+            record.status == Status::Failed
+                && record
+                    .failure
+                    .as_ref()
+                    .is_some_and(|f| f.kind == FailureKind::Abandoned)
+                && record.result.is_none()
+                && record.artifacts.is_empty(),
+        ));
+        let again = reopened.recover_abandoned()?;
+        checks.push(InvariantCheck::new(
+            "abandoned_exactly_once",
+            "a second recovery changes nothing",
+            format!("{} recovered", again.len()),
+            again.is_empty(),
+        ));
+        let lock = lab_dir.join("locks").join(format!("{created}.create"));
+        checks.push(InvariantCheck::new(
+            "creation_lock_removed",
+            "no creation lock file remains",
+            if lock.exists() { "present" } else { "absent" },
+            !lock.exists(),
+        ));
+        let base = reopened.experiment(baseline.record.id)?;
+        checks.push(InvariantCheck::new(
+            "earlier_result_preserved",
+            "the earlier completed experiment is unchanged",
+            format!("{} {:?}", base.status, base.result_digest),
+            base.status == Status::Completed && base.result_digest == baseline.record.result_digest,
+        ));
+        cases.push(CaseResult::new(
+            id,
+            None,
+            FailureMode::ProcessKilled,
+            killed,
+            format!("the child created {created}, another process opened the lab, then the child was {how}"),
+            checks,
+            json!({ "status": record.status }),
+            Value::Null,
+        ));
+    }
+
     // A completed artifact corrupted on disk.
     {
         let id = "completed_artifact_edited/deliberate_corruption".to_owned();
@@ -1018,6 +1098,13 @@ fn experiment_interruption(ctx: &mut Ctx, n: u64) -> Infallible<Vec<CaseResult>>
                 "refused"
             },
             trace_page.is_err(),
+        ));
+        let attempt = lab.reproduce(baseline.record.id, &store)?;
+        checks.push(InvariantCheck::new(
+            "reproduction_reports_missing_evidence",
+            "reproduce reports artifact_missing, never reproduced",
+            attempt.status.clone(),
+            attempt.status == crate::reproduction::ReproductionStatus::ArtifactMissing.as_str(),
         ));
         cases.push(CaseResult::new(
             id,
@@ -1427,12 +1514,15 @@ pub fn reproduce(lab: &Lab, id: ExperimentId, exe: &Path) -> Result<Verification
         });
     };
     let (status, detail) = match record_spec(&record) {
-        Err(e) => ("configuration_mismatch", json!({ "reason": e.0 })),
+        Err(e) => (
+            ReproductionStatus::ConfigurationMismatch.as_str(),
+            json!({ "reason": e.0 }),
+        ),
         Ok((spec, info)) => {
             let name = format!("{id}-reproduction-{}", uuid::Uuid::now_v7());
             match execute_scenario(lab, work_dir(lab, &name), exe, &spec, info) {
                 Err(e) => (
-                    "not_reproducible",
+                    ReproductionStatus::NotReproducible.as_str(),
                     json!({ "reason": format!("the rerun could not be carried out: {}", e.0) }),
                 ),
                 Ok((result, _)) => {
@@ -1446,7 +1536,12 @@ pub fn reproduce(lab: &Lab, id: ExperimentId, exe: &Path) -> Result<Verification
                         .collect();
                     let same = old_sig.len() == new_sig.len() && differences.is_empty();
                     (
-                        if same { "reproduced" } else { "differs" },
+                        if same {
+                            ReproductionStatus::Reproduced
+                        } else {
+                            ReproductionStatus::Differs
+                        }
+                        .as_str(),
                         json!({
                             "compared": "case verdicts, observed faults and held invariants",
                             "recorded_verdict": recorded["verdict"],

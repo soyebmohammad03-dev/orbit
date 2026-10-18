@@ -49,11 +49,11 @@ use crate::spec::{DIFFERENTIAL_REPLAY, DifferentialSpec, SPEC_VERSION};
 /// event store's, so neither can be opened as the other.
 pub const APPLICATION_ID: i64 = 0x4F52_4C42;
 /// Newest registry schema version.
-pub const LATEST_VERSION: i64 = 3;
+pub const LATEST_VERSION: i64 = 4;
 /// How long a writer waits for a lock held by another connection.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MIGRATIONS: [&str; 3] = [
+const MIGRATIONS: [&str; 4] = [
     r"
 CREATE TABLE experiments (
     id              BLOB PRIMARY KEY CHECK (length(id) = 16),
@@ -268,6 +268,135 @@ CREATE TRIGGER verifications_only_when_finished BEFORE INSERT ON verifications
 WHEN (SELECT status FROM experiments WHERE id = NEW.experiment_id) NOT IN ('completed', 'failed')
 BEGIN SELECT RAISE(ABORT, 'only finished experiments can be verified'); END;
 ",
+    r"
+-- v4 (Phase 9): admit performance experiments (no stream, implementations or
+-- input range, like reliability experiments), and record imported evidence
+-- bundles apart from locally executed experiments. The experiments table is
+-- rebuilt as in v3 because SQLite cannot alter a CHECK constraint.
+DROP TRIGGER experiment_artifacts_only_while_running;
+DROP TRIGGER verifications_only_when_finished;
+DROP TRIGGER experiments_no_delete;
+DROP TRIGGER experiments_lifecycle;
+DROP TRIGGER experiments_identity_is_immutable;
+DROP INDEX experiments_by_stream;
+
+CREATE TABLE experiments_v4 (
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    kind            TEXT NOT NULL CHECK (kind IN ('differential_replay', 'reliability', 'performance')),
+    spec_version    INTEGER NOT NULL CHECK (spec_version >= 1),
+    spec            TEXT NOT NULL,
+    spec_digest     BLOB NOT NULL CHECK (length(spec_digest) = 32),
+    stream_id       TEXT,
+    left_impl       TEXT,
+    right_impl      TEXT,
+    implementations TEXT NOT NULL,
+    orbit_version   TEXT NOT NULL,
+    git_commit      TEXT,
+    created_at      INTEGER NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('created', 'running', 'completed', 'failed')),
+    started_at      INTEGER,
+    finished_at     INTEGER,
+    elapsed_micros  INTEGER,
+    input           TEXT,
+    outcome         TEXT,
+    result          TEXT,
+    result_digest   BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32),
+    reproducibility TEXT CHECK (reproducibility IS NULL
+                                OR reproducibility IN ('reproducible', 'unverified', 'not_reproducible')),
+    failure         TEXT,
+    executable_digest BLOB CHECK (executable_digest IS NULL OR length(executable_digest) = 32),
+    CHECK (kind <> 'differential_replay'
+           OR (stream_id IS NOT NULL AND left_impl IS NOT NULL AND right_impl IS NOT NULL)),
+    CHECK (CASE status
+        WHEN 'created' THEN started_at IS NULL AND finished_at IS NULL
+                            AND result IS NULL AND failure IS NULL
+        WHEN 'running' THEN started_at IS NOT NULL AND finished_at IS NULL
+                            AND result IS NULL AND failure IS NULL
+        WHEN 'completed' THEN started_at IS NOT NULL AND finished_at IS NOT NULL
+                            AND (input IS NOT NULL OR kind <> 'differential_replay')
+                            AND outcome IS NOT NULL AND result IS NOT NULL
+                            AND result_digest IS NOT NULL AND reproducibility IS NOT NULL
+                            AND failure IS NULL
+        WHEN 'failed' THEN finished_at IS NOT NULL AND failure IS NOT NULL AND result IS NULL
+    END)
+);
+INSERT INTO experiments_v4 (id, kind, spec_version, spec, spec_digest, stream_id, left_impl,
+    right_impl, implementations, orbit_version, git_commit, created_at, status, started_at,
+    finished_at, elapsed_micros, input, outcome, result, result_digest, reproducibility, failure,
+    executable_digest)
+SELECT id, kind, spec_version, spec, spec_digest, stream_id, left_impl,
+    right_impl, implementations, orbit_version, git_commit, created_at, status, started_at,
+    finished_at, elapsed_micros, input, outcome, result, result_digest, reproducibility, failure,
+    executable_digest
+FROM experiments;
+DROP TABLE experiments;
+ALTER TABLE experiments_v4 RENAME TO experiments;
+CREATE INDEX experiments_by_stream ON experiments (stream_id, id);
+CREATE INDEX experiments_by_kind ON experiments (kind, id);
+
+CREATE TRIGGER experiments_no_delete BEFORE DELETE ON experiments
+BEGIN SELECT RAISE(ABORT, 'experiments are never deleted'); END;
+
+CREATE TRIGGER experiments_lifecycle BEFORE UPDATE ON experiments
+WHEN NOT ((OLD.status = 'created' AND NEW.status IN ('running', 'failed'))
+       OR (OLD.status = 'running' AND NEW.status IN ('completed', 'failed')))
+BEGIN SELECT RAISE(ABORT, 'invalid experiment status transition'); END;
+
+CREATE TRIGGER experiments_identity_is_immutable BEFORE UPDATE ON experiments
+WHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind
+  OR NEW.spec_version IS NOT OLD.spec_version OR NEW.spec IS NOT OLD.spec
+  OR NEW.spec_digest IS NOT OLD.spec_digest OR NEW.stream_id IS NOT OLD.stream_id
+  OR NEW.left_impl IS NOT OLD.left_impl OR NEW.right_impl IS NOT OLD.right_impl
+  OR NEW.implementations IS NOT OLD.implementations
+  OR NEW.orbit_version IS NOT OLD.orbit_version OR NEW.git_commit IS NOT OLD.git_commit
+  OR NEW.executable_digest IS NOT OLD.executable_digest
+  OR NEW.created_at IS NOT OLD.created_at
+  OR (OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at)
+BEGIN SELECT RAISE(ABORT, 'experiment identity columns are immutable'); END;
+
+CREATE TRIGGER experiment_artifacts_only_while_running BEFORE INSERT ON experiment_artifacts
+WHEN (SELECT status FROM experiments WHERE id = NEW.experiment_id) IS NOT 'running'
+BEGIN SELECT RAISE(ABORT, 'artifacts can only be attached to a running experiment'); END;
+
+CREATE TRIGGER verifications_only_when_finished BEFORE INSERT ON verifications
+WHEN (SELECT status FROM experiments WHERE id = NEW.experiment_id) NOT IN ('completed', 'failed')
+BEGIN SELECT RAISE(ABORT, 'only finished experiments can be verified'); END;
+
+-- Imported evidence bundles. Kept apart from `experiments`: an imported
+-- record was not executed here, so it never takes part in the local
+-- lifecycle and can never replace a local experiment. `document` is the
+-- bundle without entry contents (those are stored as artifacts by digest).
+CREATE TABLE imported_bundles (
+    bundle_digest  BLOB PRIMARY KEY CHECK (length(bundle_digest) = 32),
+    format_version INTEGER NOT NULL CHECK (format_version >= 1),
+    experiment_id  BLOB NOT NULL CHECK (length(experiment_id) = 16),
+    kind           TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    outcome        TEXT,
+    document       TEXT NOT NULL,
+    validation     TEXT NOT NULL,
+    imported_at    INTEGER NOT NULL
+);
+CREATE INDEX imported_bundles_by_experiment ON imported_bundles (experiment_id);
+CREATE TRIGGER imported_bundles_no_update BEFORE UPDATE ON imported_bundles
+BEGIN SELECT RAISE(ABORT, 'imported bundles are immutable'); END;
+CREATE TRIGGER imported_bundles_no_delete BEFORE DELETE ON imported_bundles
+BEGIN SELECT RAISE(ABORT, 'imported bundles are never deleted'); END;
+
+CREATE TABLE bundle_verifications (
+    id            BLOB PRIMARY KEY CHECK (length(id) = 16),
+    bundle_digest BLOB NOT NULL REFERENCES imported_bundles (bundle_digest),
+    kind          TEXT NOT NULL CHECK (kind IN ('reproduction')),
+    status        TEXT NOT NULL,
+    detail        TEXT NOT NULL,
+    verified_at   INTEGER NOT NULL
+);
+CREATE INDEX bundle_verifications_by_bundle ON bundle_verifications (bundle_digest, id);
+CREATE TRIGGER bundle_verifications_no_update BEFORE UPDATE ON bundle_verifications
+BEGIN SELECT RAISE(ABORT, 'verifications are immutable'); END;
+CREATE TRIGGER bundle_verifications_no_delete BEFORE DELETE ON bundle_verifications
+BEGIN SELECT RAISE(ABORT, 'verifications are never deleted'); END;
+",
 ];
 
 /// Identifier of an experiment (UUIDv7, so ids sort by creation time).
@@ -391,6 +520,9 @@ pub enum FailureKind {
     ImplementationUnavailable,
     /// The process stopped while the experiment was running.
     Interrupted,
+    /// The process that created the experiment stopped before starting it
+    /// (detected through its creation lock; see [`crate::lab`]).
+    Abandoned,
     /// Anything else (registry or artifact I/O, store errors).
     Internal,
     /// A reliability scenario could not set up or observe its experiment
@@ -686,6 +818,16 @@ impl Registry {
     /// Database errors.
     pub fn create(&self, new: &NewExperiment) -> Result<ExperimentId> {
         let id = ExperimentId::generate();
+        self.create_with_id(id, new)?;
+        Ok(id)
+    }
+
+    /// Records a new experiment with a caller-chosen, freshly generated id
+    /// (so the caller can take the experiment's creation lock first).
+    ///
+    /// # Errors
+    /// Database errors, including a duplicate id.
+    pub fn create_with_id(&self, id: ExperimentId, new: &NewExperiment) -> Result<()> {
         let spec = to_canonical_string(&new.spec);
         let digest = crate::spec::envelope_digest(new.kind, new.spec_version, &new.spec);
         let conn = self.conn();
@@ -710,7 +852,7 @@ impl Registry {
                 now()?,
             ],
         )?;
-        Ok(id)
+        Ok(())
     }
 
     fn status_of(conn: &Connection, id: ExperimentId) -> Result<Status> {
@@ -850,6 +992,21 @@ impl Registry {
         }
     }
 
+    /// `created` → `failed`, only if the experiment is still `created`.
+    /// Returns whether it changed. Used for abandoned experiments, so an
+    /// experiment that has started in the meantime is never touched.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn fail_created(&self, id: ExperimentId, failure: &Failure) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE experiments SET status = 'failed', finished_at = ?2, failure = ?3
+             WHERE id = ?1 AND status = 'created'",
+            params![id.0.as_bytes().as_slice(), now()?, to_json(failure)?],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Loads one experiment with its artifacts.
     ///
     /// # Errors
@@ -908,16 +1065,30 @@ impl Registry {
         limit: usize,
         before: Option<ExperimentId>,
     ) -> Result<Vec<ExperimentSummary>> {
+        self.list_kind(limit, before, None)
+    }
+
+    /// Like [`list`](Self::list), restricted to one experiment kind when given.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn list_kind(
+        &self,
+        limit: usize,
+        before: Option<ExperimentId>,
+        kind: Option<&str>,
+    ) -> Result<Vec<ExperimentSummary>> {
         let conn = self.conn();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = conn.prepare(
             "SELECT id, kind, status, created_at, stream_id, left_impl, right_impl, outcome,
                     reproducibility
-             FROM experiments WHERE ?1 IS NULL OR id < ?1 ORDER BY id DESC LIMIT ?2",
+             FROM experiments WHERE (?1 IS NULL OR id < ?1) AND (?3 IS NULL OR kind = ?3)
+             ORDER BY id DESC LIMIT ?2",
         )?;
         let before = before.map(|b| b.0.as_bytes().to_vec());
         let rows = stmt
-            .query_map(params![before, limit], |r| {
+            .query_map(params![before, limit, kind], |r| {
                 Ok((
                     r.get::<_, Vec<u8>>(0)?,
                     r.get::<_, String>(1)?,
@@ -986,10 +1157,22 @@ impl Registry {
     /// # Errors
     /// Database errors.
     pub fn running(&self) -> Result<Vec<ExperimentId>> {
+        self.with_status(Status::Running)
+    }
+
+    /// Ids of experiments currently in status `created`.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn created(&self) -> Result<Vec<ExperimentId>> {
+        self.with_status(Status::Created)
+    }
+
+    fn with_status(&self, status: Status) -> Result<Vec<ExperimentId>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id FROM experiments WHERE status = 'running'")?;
+        let mut stmt = conn.prepare("SELECT id FROM experiments WHERE status = ?1")?;
         let ids = stmt
-            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+            .query_map([status.as_str()], |r| r.get::<_, Vec<u8>>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids.iter()
             .map(|b| ExperimentId::from_slice(b).ok_or_else(|| corrupt("experiment", "id")))

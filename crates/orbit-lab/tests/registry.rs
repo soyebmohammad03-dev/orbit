@@ -33,7 +33,7 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
     let app: i64 = raw
         .query_row("PRAGMA application_id", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((version, app), (3, orbit_lab::registry::APPLICATION_ID));
+    assert_eq!((version, app), (4, orbit_lab::registry::APPLICATION_ID));
     let mut tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
         .unwrap()
@@ -46,8 +46,10 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
         tables,
         [
             "artifacts",
+            "bundle_verifications",
             "experiment_artifacts",
             "experiments",
+            "imported_bundles",
             "verifications"
         ]
     );
@@ -68,7 +70,7 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
         Registry::open(&path),
         Err(LabError::UnsupportedSchemaVersion {
             found: 99,
-            supported: 3
+            supported: 4
         })
     ));
 
@@ -360,10 +362,12 @@ fn an_implementation_whose_identity_changed_fails_the_run() {
     let env = Env::new();
     let store = env.store();
     seed(&store, "c", vec![inc(1)]);
-    let record = env
-        .lab()
+    let creator = env.lab();
+    let record = creator
         .create(&spec("c", "orbit.counter", "orbit.counter"))
         .unwrap();
+    // Handed over to another lab handle, so it is not abandoned.
+    creator.release(record.id);
     // Same id, different implementation type: a different identity.
     let mut catalog = orbit_lab::Catalog::new();
     catalog

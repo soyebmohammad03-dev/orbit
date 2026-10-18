@@ -81,6 +81,12 @@ pub enum Role {
         /// Experiment.
         experiment: String,
     },
+    /// Create one experiment, print `created <id>`, then wait (until killed
+    /// or released by a line on stdin).
+    CreateAndWait {
+        /// Lab directory.
+        lab: PathBuf,
+    },
     /// After the barrier, recover interrupted experiments.
     RecoverRace {
         /// Lab directory.
@@ -235,6 +241,19 @@ pub fn main(arg: &str) -> ! {
                 Err(crate::LabError::InvalidTransition { .. }) => say("lost invalid_transition"),
                 Err(e) => say(&format!("lost {e}")),
             }
+        }
+        Role::CreateAndWait { lab } => {
+            let lab = Lab::open_without_recovery(&lab, Catalog::builtin())
+                .unwrap_or_else(|e| fail(&e.to_string()));
+            let spec = DifferentialSpec::from_json(json!({
+                "stream": STREAM,
+                "left": "orbit.counter",
+                "right": "example.counter-floor-at-zero",
+            }))
+            .unwrap_or_else(|e| fail(&e.to_string()));
+            let record = lab.create(&spec).unwrap_or_else(|e| fail(&e.to_string()));
+            say(&format!("created {}", record.id));
+            wait_for_parent();
         }
         Role::RecoverRace { lab } => {
             let lab = Lab::open_without_recovery(&lab, Catalog::builtin())

@@ -7,6 +7,7 @@
 //! <lab dir>/artifacts/sha256/ab/cdef…    artifact bytes, named by SHA-256
 //! <lab dir>/artifacts/tmp/               in-progress artifact writes
 //! <lab dir>/locks/<experiment id>.lock   held while an experiment runs
+//! <lab dir>/locks/<experiment id>.create held by its creator until it starts
 //! ```
 //!
 //! # Interrupted experiments
@@ -18,9 +19,25 @@
 //! its lock can be taken, no process is executing it any more, and it is
 //! marked `failed` with kind `interrupted`. An experiment still running in
 //! another process keeps its lock and is left alone.
+//!
+//! # Abandoned experiments
+//!
+//! [`Lab::create`] (and every other `create_*`) takes an exclusive lock on
+//! `locks/<id>.create` *before* the registry row exists, and keeps it until
+//! the experiment starts. If the creating process exits first (or drops its
+//! `Lab` without running it), the lock is free while the file remains:
+//! [`Lab::recover_abandoned`] (called by [`Lab::open`]) then marks the
+//! experiment `failed` with kind `abandoned`. It only ever changes an
+//! experiment that is still `created`, so a started experiment is never
+//! marked abandoned. To let another process run a created experiment, call
+//! [`Lab::release`] first: it deletes the file, after which the experiment
+//! is unowned and never abandoned automatically. Experiments created by
+//! versions without creation locks have no file and are also left alone.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use orbit_core::{Digest, EventStore};
@@ -37,6 +54,7 @@ use crate::registry::{
     ArtifactRef, Completion, ExperimentId, ExperimentRecord, ExperimentSummary, Failure,
     FailureKind, InputRange, NewExperiment, Registry, Status, VerificationKind, VerificationRecord,
 };
+use crate::reproduction::ReproductionStatus;
 use crate::spec::{DifferentialSpec, Side};
 
 /// File name of the registry inside the lab directory.
@@ -108,6 +126,9 @@ pub struct Lab {
     catalog: Catalog,
     dir: PathBuf,
     locks: PathBuf,
+    /// Creation locks held for experiments created through this `Lab` and
+    /// not yet started or released.
+    owned: Mutex<HashMap<ExperimentId, File>>,
 }
 
 fn json_of<T: Serialize>(value: &T) -> Result<Value> {
@@ -127,6 +148,13 @@ impl Lab {
             tracing::warn!(
                 count = recovered.len(),
                 "marked interrupted experiments as failed"
+            );
+        }
+        let abandoned = lab.recover_abandoned()?;
+        if !abandoned.is_empty() {
+            tracing::warn!(
+                count = abandoned.len(),
+                "marked abandoned experiments as failed"
             );
         }
         let removed = lab.artifacts.remove_stale_temporaries()?;
@@ -158,6 +186,7 @@ impl Lab {
             catalog,
             dir: dir.to_path_buf(),
             locks,
+            owned: Mutex::new(HashMap::new()),
         })
     }
 
@@ -208,6 +237,95 @@ impl Lab {
 
     fn lock_path(&self, id: ExperimentId) -> PathBuf {
         self.locks.join(format!("{id}.lock"))
+    }
+
+    fn create_lock_path(&self, id: ExperimentId) -> PathBuf {
+        self.locks.join(format!("{id}.create"))
+    }
+
+    fn owned(&self) -> std::sync::MutexGuard<'_, HashMap<ExperimentId, File>> {
+        self.owned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records `new` (status `created`) while holding its creation lock,
+    /// which this `Lab` keeps until the experiment starts or is released.
+    /// Every kind is created through here.
+    ///
+    /// # Errors
+    /// I/O or registry errors.
+    pub fn create_experiment(&self, new: &NewExperiment) -> Result<ExperimentRecord> {
+        let id = ExperimentId::generate();
+        let path = self.create_lock_path(id);
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)?;
+        // A fresh file: only a failing lock implementation can refuse this.
+        if let Err(e) = file.try_lock() {
+            let _ = fs::remove_file(&path);
+            return Err(std::io::Error::other(e.to_string()).into());
+        }
+        if let Err(e) = self.registry.create_with_id(id, new) {
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+        self.owned().insert(id, file);
+        self.registry.get(id)
+    }
+
+    /// Gives up this `Lab`'s creation lock on a `created` experiment so that
+    /// another process can run it. The experiment is then unowned: it is
+    /// never marked abandoned automatically. Does nothing if this `Lab` does
+    /// not hold the lock.
+    pub fn release(&self, id: ExperimentId) {
+        if let Some(file) = self.owned().remove(&id) {
+            // Deleted before unlocking, so a recovering process that waited
+            // for the lock finds no file and leaves the experiment alone.
+            let _ = fs::remove_file(self.create_lock_path(id));
+            drop(file);
+        }
+    }
+
+    /// Marks every `created` experiment whose creator is gone as `failed`
+    /// (`abandoned`): its creation lock file exists and its lock can be
+    /// taken. Experiments without a creation lock file (released, or
+    /// created by an older version) are left alone, as are experiments
+    /// whose creator still holds the lock. Returns their ids.
+    ///
+    /// # Errors
+    /// I/O or registry errors.
+    pub fn recover_abandoned(&self) -> Result<Vec<ExperimentId>> {
+        let mut recovered = Vec::new();
+        for id in self.registry.created()? {
+            let path = self.create_lock_path(id);
+            let file = match OpenOptions::new().write(true).open(&path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            match file.try_lock() {
+                Ok(()) => {
+                    // Released or started while we waited: the file is gone.
+                    if !path.exists() {
+                        continue;
+                    }
+                    let failure = Failure::new(
+                        FailureKind::Abandoned,
+                        "the process that created this experiment stopped before starting it",
+                    );
+                    if self.registry.fail_created(id, &failure)? {
+                        recovered.push(id);
+                    }
+                    let _ = fs::remove_file(&path);
+                    drop(file);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
+        Ok(recovered)
     }
 
     fn open_lock(&self, id: ExperimentId) -> Result<File> {
@@ -272,12 +390,11 @@ impl Lab {
             { "side": Side::Left, "descriptor": left.descriptor() },
             { "side": Side::Right, "descriptor": right.descriptor() },
         ]);
-        let id = self.registry.create(&NewExperiment::differential(
+        self.create_experiment(&NewExperiment::differential(
             spec,
             implementations,
             BuildInfo::current(),
-        )?)?;
-        self.registry.get(id)
+        )?)
     }
 
     /// Fingerprint recorded for `side` in an experiment's descriptors.
@@ -347,6 +464,10 @@ impl Lab {
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
         self.registry.start(id)?;
+        // Started: the creation lock has done its job. The file is deleted
+        // before the lock is released (see `release`).
+        let _ = fs::remove_file(self.create_lock_path(id));
+        drop(self.owned().remove(&id));
         let started = Instant::now();
         let outcome = self
             .fault(crate::fault::LabFaultPoint::RunAfterStart)
@@ -623,7 +744,7 @@ impl Lab {
         });
         detail["identity_completeness"] = json!(record.identity.completeness);
         self.registry
-            .add_verification(id, VerificationKind::Reproduction, status, &detail)
+            .add_verification(id, VerificationKind::Reproduction, status.as_str(), &detail)
     }
 
     /// The parts of a result that every layout records, used to compare
@@ -651,20 +772,20 @@ impl Lab {
         recorded_input: &InputRange,
         recorded_result: &Value,
         store: &EventStore,
-    ) -> Result<(&'static str, Value)> {
+    ) -> Result<(ReproductionStatus, Value)> {
         // 1. The configuration must be exactly what was recorded.
         let mut spec = match DifferentialSpec::from_json(record.spec.clone()) {
             Ok(spec) => spec,
             Err(e) => {
                 return Ok((
-                    "configuration_mismatch",
+                    ReproductionStatus::ConfigurationMismatch,
                     json!({ "reason": format!("the stored specification cannot be read by this version: {e}") }),
                 ));
             }
         };
         if spec.digest() != record.spec_digest {
             return Ok((
-                "configuration_mismatch",
+                ReproductionStatus::ConfigurationMismatch,
                 json!({ "reason": "the stored specification no longer matches its digest" }),
             ));
         }
@@ -674,7 +795,7 @@ impl Lab {
             .unwrap_or(1);
         if recorded_semantics != u64::from(differential::SEMANTICS_VERSION) {
             return Ok((
-                "configuration_mismatch",
+                ReproductionStatus::ConfigurationMismatch,
                 json!({
                     "reason": "the result was produced under different comparison rules",
                     "recorded_semantics_version": recorded_semantics,
@@ -684,14 +805,14 @@ impl Lab {
         }
         if recorded_input.to > crate::spec::MAX_EVENTS {
             return Ok((
-                "configuration_mismatch",
+                ReproductionStatus::ConfigurationMismatch,
                 json!({ "reason": format!("the recorded range exceeds this build's limit of {} events", crate::spec::MAX_EVENTS) }),
             ));
         }
         // 2. A result that was not reproducible cannot be reproduced.
         if record.reproducibility.as_deref() == Some("not_reproducible") {
             return Ok((
-                "not_reproducible",
+                ReproductionStatus::NotReproducible,
                 json!({
                     "reason": "the original result was classified not_reproducible",
                     "reasons": recorded_result.pointer("/reproducibility/reasons"),
@@ -705,13 +826,13 @@ impl Lab {
             match current {
                 None => {
                     return Ok((
-                        "implementation_unavailable",
+                        ReproductionStatus::ImplementationUnavailable,
                         json!({ "reason": format!("implementation {implementation_id} is not registered") }),
                     ));
                 }
                 Some(i) if Some(i.descriptor().fingerprint) != recorded => {
                     return Ok((
-                        "implementation_unavailable",
+                        ReproductionStatus::ImplementationUnavailable,
                         json!({
                             "reason": format!("implementation {implementation_id} has a different fingerprint"),
                             "recorded": recorded,
@@ -727,24 +848,46 @@ impl Lab {
         let input = match differential::resolve_input(store, &spec) {
             Ok(input) => input,
             Err(failure) => {
-                return Ok(("history_unavailable", json!({ "failure": failure })));
+                return Ok((
+                    ReproductionStatus::HistoryUnavailable,
+                    json!({ "failure": failure }),
+                ));
             }
         };
         if &input != recorded_input {
             return Ok((
-                "history_changed",
+                ReproductionStatus::HistoryChanged,
                 json!({ "recorded": recorded_input, "current": input }),
             ));
         }
-        // 5. Execute and compare.
+        // 5. The recorded evidence must be complete to compare with.
+        let mut damaged = Vec::new();
+        for artifact in &record.artifacts {
+            let state = self.artifacts.check(&artifact.digest, artifact.size)?;
+            if state != ArtifactState::Intact {
+                damaged.push(json!({ "role": artifact.role, "state": state }));
+            }
+        }
+        if !damaged.is_empty() {
+            return Ok((
+                ReproductionStatus::ArtifactMissing,
+                json!({ "reason": "recorded artifacts are missing or damaged, so the original evidence cannot be compared", "artifacts": damaged }),
+            ));
+        }
+        // 6. Execute and compare.
         let [left, right] = self.implementations(&spec)?;
         let run = match differential::execute(store, &spec, &input, left.as_ref(), right.as_ref()) {
             Ok(run) => run,
-            Err(failure) => return Ok(("history_unavailable", json!({ "failure": failure }))),
+            Err(failure) => {
+                return Ok((
+                    ReproductionStatus::HistoryUnavailable,
+                    json!({ "failure": failure }),
+                ));
+            }
         };
         if run.result.outcome == differential::Outcome::Nondeterministic {
             return Ok((
-                "not_reproducible",
+                ReproductionStatus::NotReproducible,
                 json!({ "reason": "an implementation behaved nondeterministically when executed again", "determinism": run.result.determinism }),
             ));
         }
@@ -792,9 +935,9 @@ impl Lab {
         });
         Ok((
             if differences.is_empty() {
-                "reproduced"
+                ReproductionStatus::Reproduced
             } else {
-                "differs"
+                ReproductionStatus::Differs
             },
             detail,
         ))

@@ -159,8 +159,28 @@ fn experiment_interruption_is_never_reported_completed() {
     let lab = env.lab();
     let record = run(&lab, "experiment-interruption", json!({}));
     assert_all_preserved(&record);
+    assert_eq!(record.spec["scenario_version"], 2);
     let all = cases(&record);
-    assert_eq!(all.len(), 7);
+    assert_eq!(all.len(), 8);
+    let abandoned = all
+        .iter()
+        .find(|c| c["id"] == "experiment_created/process_killed")
+        .unwrap();
+    assert_eq!(abandoned["fault_observed"], true, "the creator was killed");
+    for name in [
+        "live_creator_not_abandoned",
+        "abandoned_after_creator_died",
+        "abandoned_exactly_once",
+    ] {
+        assert!(
+            abandoned["invariants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["name"] == name && i["held"] == true),
+            "{name}"
+        );
+    }
     let partial = all
         .iter()
         .find(|c| c["id"] == "artifact_after_partial_write/process_abort")

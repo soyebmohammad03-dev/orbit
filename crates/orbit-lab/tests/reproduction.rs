@@ -215,7 +215,7 @@ fn sprint7_experiments_remain_readable_after_the_v2_migration() {
         .raw_registry()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "migrated in place (v1 → v2 → v3)");
+    assert_eq!(version, 4, "migrated in place (v1 → v2 → v3 → v4)");
     let list = lab.list(10, None).unwrap();
     assert_eq!(list.len(), 3);
     let statuses: Vec<Status> = list.iter().map(|s| s.status).collect();

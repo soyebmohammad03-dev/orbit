@@ -44,6 +44,7 @@ pub mod identity;
 pub mod lab;
 pub mod registry;
 pub mod reliability;
+pub mod reproduction;
 pub mod spec;
 pub mod variants;
 

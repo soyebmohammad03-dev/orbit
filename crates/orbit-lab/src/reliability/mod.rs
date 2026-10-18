@@ -139,23 +139,25 @@ pub const SCENARIOS: &[ScenarioInfo] = &[
     },
     ScenarioInfo {
         id: "experiment-interruption",
-        version: 1,
+        version: 2,
         title: "Interrupted lab experiments and artifact writes",
-        summary: "A differential replay running in a child process is aborted at each lab fault point (including halfway through an artifact write), fails by an injected error, and is paused while another process opens the registry; finally a completed artifact is corrupted on disk.",
+        summary: "A differential replay running in a child process is aborted at each lab fault point (including halfway through an artifact write), fails by an injected error, and is paused while another process opens the registry; a child that created an experiment is killed before starting it; finally a completed artifact is corrupted on disk.",
         simulates: &[
             "a process abort at each stage of an experiment run (child process)",
             "a process abort halfway through writing an artifact file",
             "an error returned before the result is recorded (simulated, in-process)",
             "a live experiment process while another process opens and recovers the registry",
+            "an external SIGKILL of a process that created an experiment and has not started it",
             "an artifact file corrupted on disk (in the scenario's own lab)",
         ],
         does_not_simulate: NO_POWER_LOSS,
         invariants: &[
             "an interrupted experiment is failed/interrupted: never completed, no result, no artifact links",
             "a live experiment is not marked interrupted while its process runs, and completes afterwards",
+            "a created experiment is not abandoned while its creator lives; once the creator is killed it is failed/abandoned exactly once",
             "earlier completed evidence stays completed, intact and reproducible",
             "temporary files of interrupted writes are removed on recovery; no partial file is stored under an artifact name",
-            "a corrupted artifact is reported damaged and never read as valid",
+            "a corrupted artifact is reported damaged and never read as valid; reproducing its experiment reports artifact_missing",
         ],
         parameters: &[ParameterInfo {
             default: 8,
@@ -553,7 +555,7 @@ impl Lab {
     /// [`LabError::InvalidSpec`] or registry errors.
     pub fn create_reliability(&self, spec: &ReliabilitySpec) -> Result<ExperimentRecord> {
         let (spec, _) = spec.validated()?;
-        let id = self.registry().create(&NewExperiment {
+        self.create_experiment(&NewExperiment {
             kind: RELIABILITY,
             spec_version: SPEC_VERSION,
             spec: serde_json::to_value(&spec)?,
@@ -562,8 +564,7 @@ impl Lab {
             right: None,
             implementations: json!([]),
             build: BuildInfo::current(),
-        })?;
-        self.registry().get(id)
+        })
     }
 }
 
