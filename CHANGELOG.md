@@ -6,6 +6,39 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Sprint 8: divergence timeline and failure diagnosis
+
+- Differential replay results (`result_version` 2):
+  - a complete divergence timeline: every interval with how it ended
+    (converged, open at the end, stopped by a failure) and where it
+    converged, plus counts and the final equality;
+  - entry and exit comparisons for the first 20 intervals;
+  - event context: digest, `recorded_at` and metadata keys, never values;
+  - change summaries;
+  - `diagnosis.evidence` kept apart from `diagnosis.not_established`;
+  - `perspective` (expected/observed only with a reference) and
+    `semantics`.
+- A per-boundary trace reader: `Lab::trace`, `orbit-lab trace`, and
+  `GET /api/v1/lab/experiments/{id}/trace`.
+- Identity completeness: experiments record the executable's SHA-256
+  (registry migration v2). Records carry an `identity` assessment with the
+  declared, configuration and build layers, a completeness level and its
+  gaps.
+- Reproduction compares traces and either the full result or, for Sprint 7
+  results, a version-independent summary. It adds the
+  `configuration_mismatch` and `not_reproducible` classifications, and
+  reports what differs and whether the executable is the same.
+- Observatory: a divergence timeline, interval details, a trace window with
+  event links, identity completeness, reproduction details; a link from
+  Replay Lab.
+- `examples/large_history.rs`, and a Sprint 7 registry fixture for
+  compatibility tests.
+
+### Changed — Sprint 8
+
+- New results list `timeline.intervals` instead of `divergent_segments`.
+  Stored Sprint 7 results are unchanged and still readable.
+
 ### Added — Sprint 7: experiment registry and differential replay
 
 - `crates/orbit-lab`, built only on `orbit-core`'s public API. `orbit-core`'s

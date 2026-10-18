@@ -17,7 +17,9 @@ reconstructs, compares and deterministically replays historical state.
 >
 > Since `v0.1.0` (unreleased, on `main`): **Sprint 7** adds `orbit-lab`, an
 > experiment registry with differential replay of two projection
-> implementations. See [docs/LAB.md](docs/LAB.md).
+> implementations. **Sprint 8** adds the complete divergence timeline,
+> evidence-based diagnosis, identity completeness and stricter reproduction.
+> See [docs/LAB.md](docs/LAB.md).
 >
 > The HTTP API is for **trusted local use only**: it has no authentication.
 
@@ -154,6 +156,18 @@ state, diffs two of them, and names the events responsible for each change.
   - an `orbit-lab` CLI;
   - five `/api/v1/lab/*` endpoints ([docs/API.md](docs/API.md#lab-endpoints));
   - an **Experiments** page in the Observatory.
+- **Sprint 8: failure diagnosis.**
+  - Every divergence interval and convergence, with entry and exit diffs,
+    event context and change summaries.
+  - Evidence kept apart from what it does not establish.
+  - A per-boundary trace API.
+  - Identity completeness (declared, configuration, Git commit, executable
+    digest), with registry migration v2.
+  - Reproduction that classifies configuration mismatches,
+    non-reproducible results, changed or unavailable histories and
+    implementations.
+  - Sprint 7 records remain readable and reproducible (tested from a real
+    fixture).
 - Design and limitations are in [docs/LAB.md](docs/LAB.md) and
   [ADR 0009](docs/adr/0009-orbit-lab-crate-and-registry.md).
 
@@ -162,9 +176,9 @@ state, diffs two of them, and names the events responsible for each change.
 | Suite | Count | Runs against |
 |-------|-------|--------------|
 | `orbit-core` unit + integration + doc | 44 + 126 + 4 | real SQLite files (126 includes 9 property tests and 2 child-process entry points) |
-| `orbit-api` unit + HTTP contract + hardening + lab + TCP | 7 + 16 + 6 + 7 + 1 | the real router and engine on temporary databases |
-| `orbit-lab` unit + differential + registry + identity + properties + CLI + doc | 3 + 16 + 11 + 7 + 2 + 2 + 1 | real event stores and registries in temporary directories (the CLI test runs the binary) |
-| Web unit and component (Vitest) | 26 | the API client, components, the Overview and Experiments views, with mocked responses |
+| `orbit-api` unit + HTTP contract + hardening + lab + TCP | 7 + 16 + 6 + 8 + 1 | the real router and engine on temporary databases |
+| `orbit-lab` unit + differential + timeline + reproduction + registry + identity + properties + CLI + doc | 3 + 16 + 10 + 7 + 11 + 7 + 3 + 2 + 1 | real event stores and registries in temporary directories; timelines checked against an independent reference; a real Sprint 7 registry fixture |
+| Web unit and component (Vitest) | 29 | the API client, components, the Overview and Experiments views, with mocked responses |
 | End-to-end (Playwright) | 3 | a real `orbit-api` + production web build + empty temporary SQLite files (event store and lab registry) |
 
 Criterion suites cover the event store, reconstruction, and Phase 3's
@@ -393,9 +407,9 @@ The lab's own limitations are listed in [docs/LAB.md](docs/LAB.md#known-limitati
 | 5 | Verification, hardening, documentation, release | **done** (`v0.1.0`) |
 | Sprint 6 | Audit and lab architecture ([ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md)) | **done** |
 | Sprint 7 | Experiment registry, implementation identity, differential replay ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
+| Sprint 8 | Divergence timeline, failure diagnosis, identity completeness, reproduction classes ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
 
-Sprint 8 onward (evidence bundles, reliability and performance labs) is
-planned in [docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md) and not
+Evidence bundles and the reliability and performance labs are planned in [docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md) and not
 implemented.
 
 ## Release status

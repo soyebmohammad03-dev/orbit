@@ -125,7 +125,13 @@ Responses are the lab's own serialized records.
 | `POST /lab/experiments` | `{kind: "differential_replay", spec: {stream, left, right, from?, to?, reference?, determinism_check?}}` validates, records and runs an experiment. **A missing or damaged history is a `failed` experiment (201), not an HTTP error.** | 201 | 400 `invalid_spec` (unknown fields are rejected), 400 `unknown_implementation`, 400 `unsupported_experiment_kind` |
 | `GET /lab/experiments/{id}` | The stored experiment (spec, descriptors, build, lifecycle timestamps, input range, result, artifacts) and its verifications | 200 | 400, 404 `experiment_not_found` |
 | `POST /lab/experiments/{id}/verify` | Re-hashes the stored spec, result and every artifact. Records and returns the report (`intact` or `damaged`). | 200 | 404, 409 `invalid_state` (not finished) |
-| `POST /lab/experiments/{id}/reproduce` | Re-executes from the stored spec and compares result digests (`reproduced`, `differs`, `history_changed`, `history_unavailable`, `implementation_unavailable`). Records the attempt. | 201 | 404, 409 `invalid_state` (not completed) |
+| `POST /lab/experiments/{id}/reproduce` | Re-executes from the stored spec and compares with the original (`reproduced`, `differs`, `configuration_mismatch`, `not_reproducible`, `history_changed`, `history_unavailable`, `implementation_unavailable`; see [LAB.md](LAB.md#reproducing-and-verifying)). Records the attempt. | 201 | 404, 409 `invalid_state` (not completed) |
+| `GET /lab/experiments/{id}/trace?from=&limit=` | Per-boundary trace of a completed experiment: `{boundary, left, right, equal}` read from the verified trace artifacts, with a cursor (`next_from`) | 200 | 400 `invalid_parameter` (limit 1–500), 404, 409 `invalid_state` (not completed), 500 `integrity_violation` (trace artifact missing or corrupted) |
+
+Experiment records include `identity` (declared, configuration and build
+identity, `completeness` and `gaps`). Results recorded since Sprint 8
+(`result_version` 2) include `timeline`, `diagnosis`, `perspective` and
+`semantics`; older results are returned as stored. See [LAB.md](LAB.md).
 
 `POST /lab/experiments` runs synchronously. If it outlasts the request
 deadline the response is `503 request_timeout`, and the experiment still

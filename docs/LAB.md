@@ -66,7 +66,7 @@ Change it with `--lab` or `ORBIT_LAB_DIR`. `data/` is git-ignored.
 
 ## Registry
 
-### Schema (version 1)
+### Schema (version 2)
 
 | Table | Purpose |
 |-------|---------|
@@ -82,16 +82,26 @@ Change it with `--lab` or `ORBIT_LAB_DIR`. `data/` is git-ignored.
 | Identity | `id` (16-byte UUIDv7), `kind`, `spec_version`, `spec` (canonical JSON), `spec_digest` |
 | Input request | `stream_id`, `left_impl`, `right_impl` |
 | Implementations | `implementations`: both descriptors, canonical JSON |
-| Software | `orbit_version`, `git_commit` |
+| Software | `orbit_version`, `git_commit`, `executable_digest` (v2; `NULL` for older rows) |
 | Lifecycle | `status`, `created_at`, `started_at`, `finished_at`, `elapsed_micros` |
 | Outcome | `input` (the resolved range), `outcome`, `result`, `result_digest`, `reproducibility` |
 | Failure | `failure` (`{kind, message, details}`) |
 
 Initialization works the same way as the event store's. A new or empty file
-gets version 1. A file holding any other schema, or another application id,
-is refused (`NotALabRegistry`). A newer version is refused
-(`UnsupportedSchemaVersion`). Later migrations will be appended to the same
-ordered list.
+is migrated to the latest version. A file holding any other schema, or another
+application id, is refused (`NotALabRegistry`). A newer version is refused
+(`UnsupportedSchemaVersion`). Migrations run in order, each in one
+transaction:
+
+| Version | Sprint | Change |
+|---------|--------|--------|
+| 1 | 7 | Tables, triggers and constraints above |
+| 2 | 8 | Adds `experiments.executable_digest` and adds it to the immutable identity columns (the trigger is recreated). Existing rows keep `NULL`. |
+
+Sprint 7 registries open unchanged in content. A test loads a real Sprint 7
+registry, event store and artifacts (`tests/fixtures/sprint7/`, dumped from
+commit `a44e62f`), migrates it, reads every record, verifies its artifacts and
+reproduces its experiments.
 
 Representation:
 
@@ -208,6 +218,34 @@ demonstrate and test the lab.
   `crates/orbit-lab/build.rs`, or from `ORBIT_GIT_COMMIT`; uncommitted
   changes are not detected.
 
+### Identity layers and completeness
+
+Every experiment record carries an `identity` assessment, derived from what
+was stored and never stored itself. It keeps four things apart:
+
+| Layer | What it is | Where |
+|-------|------------|-------|
+| Declared | id, name, projection key, adapter, type name, determinism, and the `fingerprint` over them | each descriptor |
+| Configuration | `config_digest` over the canonical configuration | each descriptor |
+| Build | `orbit_version`, `git_commit` (build time) and `executable_digest`: SHA-256 of the running executable, read once per process from `std::env::current_exe()` | the experiment's build |
+| Completeness | how much of the above is known | `identity.completeness`, `identity.gaps` |
+
+| Completeness | Meaning |
+|--------------|---------|
+| `executable` | The digest of the binary that ran is recorded. It identifies the exact compiled code, including uncommitted changes, but for **every** implementation at once: any change anywhere in the program changes it. A file replaced on disk after the process started is not detected. |
+| `source_revision` | Only the Git commit is known (Sprint 7 records). Uncommitted changes and the build environment are not captured. |
+| `declared` | Neither is known. A code change that keeps the declared fields is invisible. |
+
+`gaps` lists, in words, what the identity does not capture. No layer claims
+semantic equivalence. Source code is not discovered or hashed at run time;
+that would be unreliable for compiled Rust.
+
+The build is recorded when the experiment is created; `create_and_run`
+(used by the CLI and the API) creates and runs in the same process.
+Reproduction reports `same_executable` (`true`, `false`, or `null` when either
+digest is unknown) next to its classification. A different executable does not
+by itself make a reproduction fail; only the results decide that.
+
 An experiment stores both descriptors when it is created. A run or
 reproduction is refused (`implementation_unavailable`) when an implementation
 is no longer registered, or its current fingerprint differs from the
@@ -264,19 +302,11 @@ a client orders members or omits defaults.
    3. The *same* `&StoredEvent` value is applied to left, then right, so both
       receive identical ordered input. `events_fed_digest`
       (`ORBIT-LAB-EVENTS-V1`) records the ordered digests fed to them.
-3. **Compare at every boundary.**
-   - Boundary `b` is the state after event `b`; boundary 0 is the initial
-     state.
-   - For `from <= b <= to`, both states are serialized with `serde_json` and
-     compared by `state_digest`, which is SHA-256 over canonical JSON.
-   - At the first differing boundary the result records:
-     - the event;
-     - both state summaries (digest and canonical size);
-     - the number of matching boundaries before it;
-     - the structural diff from `orbit_core::diff::diff`, left → right, up
-       to 200 changes plus the total.
-   - Every maximal run of differing boundaries is a **segment**, so several
-     separate divergences are reported (up to 100 segments, plus the total).
+3. **Compare at every boundary** `from <= b <= to` (see
+   [Boundaries and intervals](#boundaries-and-intervals)): both states are
+   serialized with `serde_json` and compared by `state_digest`, which is
+   SHA-256 over canonical JSON. Both digests are appended to the traces, and
+   the timeline is updated as described below.
 4. **Stop at the first failure.** An implementation fails by rejecting an
    event, panicking, or producing a state that cannot be serialized. Panics
    are caught with `catch_unwind`. Both sides stop there, and the failure,
@@ -284,6 +314,66 @@ a client orders members or omits defaults.
 5. **Check determinism** (on by default). Each implementation runs again,
    alone, on a fresh instance, over exactly the events it saw. Its trace and
    failure must be identical.
+
+### Boundaries and intervals
+
+- **Boundary `b`** is the state **after** applying events `1..=b`.
+  Boundary 0 is the initial state, before any event. Only boundaries
+  `from..=to` are compared.
+- **Equal** means equal `state_digest`s: the canonical JSON (sorted keys,
+  no whitespace, serde_json number formatting) of the two serialized states
+  is byte-identical.
+- **A divergence at boundary `b`** means the states differ after event `b`.
+  At the first compared boundary there is no earlier comparison, so the
+  states may already have differed before it.
+- **A divergence interval** is a maximal run of consecutive differing
+  boundaries `first..=last`. It ends in one of three ways:
+  - `converged`: equal again at `converged_at = last + 1`, the boundary
+    after `convergence_event`;
+  - `open_at_end`: still different at `to`;
+  - `stopped_by_failure`: an implementation failed while the states differed.
+- **The timeline** (`result.timeline`) lists every interval in order (up to
+  1,000; `intervals_total` and `intervals_truncated` say if there are
+  more), with `convergences` and `final_equal`. `boundaries_differing` counts
+  every differing boundary.
+- **Diagnosis at important boundaries.** The first 20 intervals carry a full
+  comparison at their first boundary (`entry`) and, when longer than one
+  boundary, at their last (`exit`):
+  - the event, with id, type, schema version, digest, `recorded_at` and
+    metadata **keys** (values are not copied: they may be sensitive);
+  - both state digests and canonical sizes;
+  - the structural diff (up to 200 changes plus the total);
+  - a `change_summary`: added, removed, modified, and modified with a
+    different JSON type.
+
+  Later intervals list boundaries only.
+- **Every boundary's** digest pair is in the trace artifacts. `Lab::trace`
+  (CLI `trace`, API `GET …/trace`) pages through them with an `equal` flag
+  and links each boundary to its event.
+
+Full states are not stored for every boundary. In memory the lab holds the
+current pair of states, plus, while a diagnosed interval is open, the pair at
+its latest differing boundary (to produce the `exit` diff).
+
+### Diagnosis: evidence and open questions
+
+`result.diagnosis` has two lists:
+
+- **`evidence`:** facts read from the comparison. For example: where the
+  states first differ and after which event, how many paths differ and of
+  which kind, how many intervals and convergences there were, the final
+  equality, and failures.
+- **`not_established`:** what those facts do not show. Always why the states
+  differ; whether the cause is in the event's handling or in earlier hidden
+  state; and which side is correct. Without a reference: neither is assumed.
+  With one: the reference is taken as expected by request, and the lab does
+  not check it.
+
+The lab never states a cause.
+
+`result.perspective` gives the reading of sides and diffs: `reference`,
+`expected`, `observed`, and `changes_orientation: "left_to_right"` (a
+change's `from` is the left value, `to` the right value).
 
 **Outcomes:**
 
@@ -309,9 +399,17 @@ left → right.
 | `final_states` | `{"left": …, "right": …}` at `to` | if neither side failed |
 
 The result itself (`result`, digest `ORBIT-LAB-RESULT-V1`) contains no ids,
-timestamps or timings. Running the same experiment again on the same input
-therefore yields the same document and the same digest. Wall-clock time is
-stored separately, in `elapsed_micros`.
+build details or timings of the run. Running the same experiment again on the
+same input therefore yields the same document and the same digest.
+Wall-clock time is stored separately, in `elapsed_micros`.
+
+**Result versions.** `result_version` 2 (Sprint 8) adds `semantics`,
+`perspective`, `timeline` and `diagnosis`, change summaries and richer event
+context, and replaces Sprint 7's `divergent_segments`. Sprint 7 results have
+no `result_version` (version 1) and stay as they were stored; the
+Observatory shows their segments as intervals whose end was not recorded.
+`semantics.version` (1 in both) names the comparison rules: boundary
+meaning, canonical state comparison, the diff algorithm and the limits.
 
 ### Determinism assumptions
 
@@ -343,19 +441,32 @@ The `reasons` field says why.
 ### Reproducing and verifying
 
 - **`Lab::reproduce`** (CLI `reproduce`, API `POST …/reproduce`) re-executes a
-  completed experiment from its stored spec, with `to` pinned to the recorded
-  value, and compares result digests. The attempt is recorded. Statuses:
+  completed experiment and compares it with the original. Nothing is
+  substituted. Checks run in this order, and the first that fails decides:
 
   | Status | Meaning |
   |--------|---------|
-  | `reproduced` | The result digest is identical |
-  | `differs` | The result changed |
-  | `history_unavailable` | The stream is missing or now fails verification |
-  | `history_changed` | The events at the recorded boundaries have different digests, e.g. another store with a same-named stream |
-  | `implementation_unavailable` | An implementation is missing or its fingerprint changed |
+  | `configuration_mismatch` | The stored spec no longer matches its digest or cannot be read by this version; the result was produced under different comparison rules (`semantics.version`); or the recorded range exceeds this build's event limit |
+  | `not_reproducible` | The original was classified `not_reproducible`, or the re-execution was nondeterministic |
+  | `implementation_unavailable` | An implementation is not registered, or its fingerprint changed |
+  | `history_unavailable` | The stream is missing, too short, or fails verification |
+  | `history_changed` | The events at the recorded boundaries have different digests (e.g. another store with a same-named stream) |
+  | `reproduced` | Same result (below) |
+  | `differs` | A different result. `detail.differences` names what differs: `left_trace`, `right_trace`, `result_document`, or summary fields. |
 
-  The build that recorded the experiment and the build reproducing it are
-  both included.
+  "Same result" means both re-executed traces have the recorded artifact
+  digests, and:
+  - for a result of the current layout, the result document has the same
+    digest (`detail.compared: "full_result"`);
+  - for a Sprint 7 result, a version-independent summary matches
+    (`"traces_and_summary"`): outcome, input, events fed, counts, first
+    divergence and final digests, failures.
+
+  `to` is pinned to the recorded value, so events appended later don't
+  matter. `detail.build` records both builds and `same_executable`, and
+  `detail.identity_completeness` the identity level. Only completed
+  experiments can be reproduced; failed or unfinished ones return
+  `InvalidState` (API 409) and record nothing.
 - **`Lab::verify_artifacts`** (CLI `verify`, API `POST …/verify`) re-hashes the
   stored spec and result and every artifact file, and checks that each trace
   holds exactly 32 bytes per compared boundary. Each artifact is `intact`, `missing` or
@@ -365,7 +476,9 @@ The `reasons` field says why.
 The registry does not copy event histories. Reproduction needs the same
 event store. If that history is gone or damaged, the lab says so and does not
 claim the result is reproducible. Portable bundles that include the history
-are planned for Sprint 8.
+are a later sprint. The smallest change that would make reproduction
+independent of the original store is a history artifact: a copy of events
+`1..=to` with their digests, verifiable by recomputing the chain.
 
 ### Artifact safety
 
@@ -393,42 +506,85 @@ cargo run -p orbit-lab -- list
 cargo run -p orbit-lab -- show <id>
 cargo run -p orbit-lab -- verify <id>
 cargo run -p orbit-lab -- reproduce <id>
+cargo run -p orbit-lab -- trace <id> --from 1 --limit 3
 ```
 
 `--db` (default `$ORBIT_DB_PATH` or `data/orbit.db`) and `--lab` (default
 `$ORBIT_LAB_DIR` or `data/lab`) select the files. `run --spec FILE.json` reads
 a spec from a file. Output is JSON.
 
-Excerpt from an actual run of exactly this history, on 2026-10-18:
+Excerpt from an actual run of exactly this history with the Sprint 8 build,
+on 2026-10-18 (abridged; `…` marks omitted fields):
 
 ```json
 {
-  "status": "completed",
   "outcome": "diverged",
   "reproducibility": "reproducible",
+  "identity": { "completeness": "executable", "…": "…" },
   "result": {
-    "events_processed": 3,
+    "result_version": 2,
     "boundaries_compared": 4,
     "boundaries_differing": 2,
-    "divergent_segments": [{ "first": 2, "last": 3 }],
     "first_divergence": {
       "boundary": 2,
       "boundaries_matched_before": 2,
-      "changes": [{ "path": "/value", "op": "modified", "from": -3, "to": 0 }]
+      "changes": [{ "path": "/value", "op": "modified", "from": -3, "to": 0 }],
+      "change_summary": { "added": 0, "removed": 0, "modified": 1, "type_changed": 0 }
     },
-    "final_comparison": {
-      "changes": [{ "path": "/value", "op": "modified", "from": -2, "to": 1 }]
+    "timeline": {
+      "intervals": [{ "index": 1, "first": 2, "last": 3, "end": "open_at_end", "…": "…" }],
+      "intervals_total": 1,
+      "convergences": 0,
+      "final_equal": false
+    },
+    "perspective": { "reference": "left", "expected": "left", "observed": "right", "changes_orientation": "left_to_right" },
+    "diagnosis": {
+      "evidence": [
+        "The states were equal at 2 compared boundaries and first differ at boundary 2, after event #2 (counter.decremented, schema v1).",
+        "…"
+      ],
+      "not_established": [
+        "Why the states differ. The first differing boundary is where a difference first becomes visible in the serialized states, not necessarily where it was caused.",
+        "…"
+      ]
     }
-  },
-  "artifacts": ["final_states", "first_divergence_states", "left_trace", "right_trace"]
+  }
 }
 ```
 
-`verify` returned `intact` for all four artifacts, and `reproduce` returned
-`reproduced`.
+`trace <id> --from 1 --limit 3` returned boundaries 1 (equal), 2 and 3
+(differ), and `reproduce` returned `reproduced` with `compared:
+"full_result"`, no differences, and `same_executable: true`.
 
 The same flow works through the API (`docs/API.md`, "Lab endpoints") and in
 the Observatory under **Experiments**.
+
+## Resource limits
+
+| Limit | Value | Why |
+|-------|-------|-----|
+| Events per experiment | 100,000 (`MAX_EVENTS`, the core's replay cap) | bounds traces and time |
+| Trace artifacts | 32 bytes per compared boundary per side: at most 3.2 MB each | every boundary stays inspectable |
+| Intervals listed | 1,000 (`MAX_RECORDED_INTERVALS`), plus the total | keeps the result document bounded |
+| Intervals with diffs | 20 (`MAX_DIAGNOSED_INTERVALS`) | each diff needs both full states |
+| Changes per comparison | 200 (`MAX_RECORDED_CHANGES`), plus the total | bounds large state diffs |
+| Trace page | 1,000 entries in the library; 500 through the API (its page cap) | bounded responses |
+| States in memory | the current pair, plus one more pair while a diagnosed interval is open | no per-boundary state retention |
+
+One measurement, not a benchmark: `cargo run --release -p orbit-lab --example
+large_history -- 100000` on an Apple M3 (8 GB, macOS 27.0.1), 2026-10-18. It
+builds a 100,000-event stream in which the counter and its floor variant
+diverge and converge 10,000 times, then runs one differential replay.
+
+- The replay, including the determinism re-execution, took 0.65 s.
+- Peak resident memory of the whole process was 36.5 MB, including building
+  the store.
+- The traces were 3.2 MB each.
+- The result document was 409 KB: 1,000 listed intervals, 20 of them with
+  diffs.
+
+This is one run on one machine. Times depend on the projections, state sizes
+and storage.
 
 ## Known limitations
 
@@ -439,15 +595,18 @@ the Observatory under **Experiments**.
   used, because a snapshot is one implementation's state.
 - **The whole stream is verified,** including events after `to`. Damage
   anywhere refuses the experiment.
-- **Up to 100,000 events.** States live in memory; the full states are kept
-  only at the first divergence and at the end.
+- **Up to 100,000 events.** See [Resource limits](#resource-limits).
 - **Divergence is located, not explained.** The first differing boundary
   shows where the states first differ, not why.
 - **Positional array diffs**, as in the core.
 - **The fingerprint does not cover code bodies** (see above), and the
   determinism check can disprove determinism but cannot prove it.
 - **Reproduction needs the original event store.** There is no portable
-  evidence bundle yet (Sprint 8).
+  evidence bundle yet.
+- **Identity is coarse at its best.** The executable digest covers the whole
+  binary, not one implementation, and Sprint 7 records have none.
+- **Only completed experiments have traces.** A failed experiment records no
+  artifacts.
 - **Synchronous API runs.** `POST /lab/experiments` runs synchronously. Past
   the request deadline the client gets `503 request_timeout`, while the
   experiment still finishes and is recorded.

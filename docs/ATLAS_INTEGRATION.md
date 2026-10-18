@@ -20,7 +20,10 @@ Audited state: `main` at `7cc2cae`, tag `v0.1.0`, on 2026-10-18.
 > - `ignore_paths` is not implemented;
 > - `rust-toolchain.toml` was not added.
 >
-> Sprint 8 onward is still a plan.
+> Sprint 8, as redefined by its brief, delivered the divergence timeline,
+> diagnosis, identity completeness and reproduction classes instead of
+> evidence bundles. Evidence bundles and everything after them are still a
+> plan.
 
 ## 1. Verified repository and release state
 

@@ -29,6 +29,8 @@ cargo run -p orbit-core --example time_travel # reconstruction, snapshots, diff
 cargo run -p orbit-core --example crash_lab   # verification, checkpoints, replay, divergence
 cargo run -p orbit-lab -- implementations     # lab: registered implementations
 cargo run -p orbit-lab -- run --stream S --left orbit.counter --right example.counter-floor-at-zero
+cargo run -p orbit-lab -- trace <id>          # per-boundary digests
+cargo run --release -p orbit-lab --example large_history -- 100000   # one large run, prints sizes and time
 ```
 
 The lab reads `data/orbit.db` and keeps its registry in `data/lab` (override
@@ -94,7 +96,9 @@ is a smoke test, not a measurement.
 | `orbit-lab` `tests/differential.rs` | Equivalent, diverged (first divergence with event and diff), reconverged and multi-segment results, empty and single-event histories, divergence at boundary 0, missing/short/damaged histories, rejections and panics, nondeterminism (detected, declared, unchecked), canonical comparison, windows, agreement with the core replay trace, reproduction (pinned range, restart, missing implementation, damaged or different history) |
 | `orbit-lab` `tests/registry.rs` | Initialization and refusal of foreign or newer files, lifecycle transitions and refusals, triggers against raw SQL, persistence across restarts, pagination, concurrent registries, interrupted-run recovery with live and dead locks, identity changes, artifact verification (corrupted, missing), tampered records, atomic deduplicating writes, symlinks |
 | `orbit-lab` `tests/identity.rs` | Same name and version with different implementations, fingerprint stability under equivalent configuration, every identity field changing the fingerprint, the documented code-body limitation, id validation, duplicate ids, JSON round trip, spec digest canonicalization |
-| `orbit-lab` `tests/properties.rs` | Proptest: self-comparison is equivalent and its trace equals `ReplayLab::record`; the floor variant first diverges exactly where the counter first goes negative |
+| `orbit-lab` `tests/properties.rs` | Proptest: self-comparison is equivalent and its trace equals `ReplayLab::record`; the floor variant first diverges exactly where the counter first goes negative; for random histories, two variants and any window, every interval, convergence, count, trace entry and entry diff equals an independent reference (direct folds, `serde_json::Value` equality, a naive interval scan), and the result reproduces |
+| `orbit-lab` `tests/timeline.rs` | Divergence at the first and the final event, entry/exit diffs and convergence events, reference perspective, metadata keys without values, nested JSON with nulls, arrays and numbers (against the reference), a 3,000-event history with 300 intervals paged through the trace, trace windows and bounds, intervals stopped by failures, identity completeness, artifact write failures |
+| `orbit-lab` `tests/reproduction.rs` | Reproduction: identical, changed result (`differs` with what changed), tampered spec and other comparison rules (`configuration_mismatch`), nondeterministic results, missing implementation, changed or short history, later appends; a real Sprint 7 registry fixture migrated, read, verified and reproduced |
 | `orbit-lab` `tests/cli.rs`  | The `orbit-lab` binary: implementations, run (flags and `--spec`), list, show, verify, reproduce, error exits |
 | `web/tests/unit`            | API client (URLs, bodies, error envelope, network errors, timing header), formatters, DiffView, ErrorState and EmptyState, navigation, the Overview page's loading, empty, data, error/retry and unrun-check states |
 | `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API; a differential replay run, inspected, verified and reproduced from the Experiments page, which must fit a 375 px screen |
