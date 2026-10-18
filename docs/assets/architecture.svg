@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">ORBIT architecture</title>
+  <desc id="desc">The Observatory calls orbit-api over HTTP. orbit-api uses orbit-core for the event store and orbit-lab for experiments, artifacts and bundles. orbit-lab only reads event stores through orbit-core's public API. Reliability scenarios run only in the separately built orbit-reliability runner, which orbit-api can start only when an operator configures it. Each component's storage is shown.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a94a3"/>
+    </marker>
+    <marker id="warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d9a93f"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill: #111418; stroke: #2f3843; stroke-width: 1.5; }
+    .core { stroke: #5cb8ff; }
+    .priv { stroke: #d9a93f; stroke-dasharray: 6 4; }
+    .store { fill: #161a20; stroke: #2f3843; }
+    .h { font: 600 18px ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #e4e8ee; }
+    .t { font: 13px ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #8a94a3; }
+    .m { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #8a94a3; }
+    .a { stroke: #8a94a3; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+    .w { stroke: #d9a93f; stroke-width: 1.5; fill: none; marker-end: url(#warn); stroke-dasharray: 6 4; }
+    .l { font: 12px ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #5d6672; }
+  </style>
+  <rect width="1200" height="720" fill="#0b0d10"/>
+
+  <!-- Observatory -->
+  <rect class="box" x="40" y="40" width="300" height="150" rx="10"/>
+  <text class="h" x="60" y="72">Observatory</text>
+  <text class="m" x="60" y="94">web/ · Next.js · TypeScript</text>
+  <text class="t" x="60" y="122">Streams, events, time travel, snapshots,</text>
+  <text class="t" x="60" y="140">integrity, replay, experiments,</text>
+  <text class="t" x="60" y="158">performance, evidence, reliability runs</text>
+
+  <!-- CLIs -->
+  <rect class="box" x="40" y="250" width="300" height="120" rx="10"/>
+  <text class="h" x="60" y="282">orbit-lab CLI</text>
+  <text class="t" x="60" y="308">run · measure · compare(-runs) · export</text>
+  <text class="t" x="60" y="326">validate · import · sign · keygen</text>
+  <text class="t" x="60" y="344">reproduce · reproduce-bundle</text>
+
+  <!-- orbit-api -->
+  <rect class="box core" x="430" y="40" width="340" height="190" rx="10"/>
+  <text class="h" x="450" y="72">orbit-api</text>
+  <text class="m" x="450" y="94">Axum · /api/v1 · OpenAPI</text>
+  <text class="t" x="450" y="122">Loopback by default, Host allowlist, CORS,</text>
+  <text class="t" x="450" y="140">body/page/time limits, structured errors.</text>
+  <text class="t" x="450" y="164">No authentication: trusted local use.</text>
+  <text class="t" x="450" y="188">No fault-injection code (checked in CI).</text>
+  <text class="t" x="450" y="212">Background: one measurement, one launch.</text>
+
+  <!-- orbit-core -->
+  <rect class="box core" x="430" y="300" width="340" height="170" rx="10"/>
+  <text class="h" x="450" y="332">orbit-core</text>
+  <text class="t" x="450" y="358">EventStore: append-only streams,</text>
+  <text class="t" x="450" y="376">optimistic concurrency, SHA-256 chain</text>
+  <text class="t" x="450" y="394">Reconstructor · snapshots · diffs</text>
+  <text class="t" x="450" y="412">ReplayLab · verification · checkpoints</text>
+  <text class="t" x="450" y="446">Fault hooks exist only with the</text>
+  <text class="t" x="450" y="462">test feature "fault-injection".</text>
+
+  <!-- orbit-lab -->
+  <rect class="box core" x="860" y="40" width="300" height="300" rx="10"/>
+  <text class="h" x="880" y="72">orbit-lab</text>
+  <text class="t" x="880" y="98">Registry: one lifecycle for every kind,</text>
+  <text class="t" x="880" y="116">creation and run locks, recovery</text>
+  <text class="t" x="880" y="140">differential replay · performance</text>
+  <text class="t" x="880" y="158">(statistics, comparison) · reliability</text>
+  <text class="t" x="880" y="176">results · reproduction statuses</text>
+  <text class="t" x="880" y="200">Artifacts by SHA-256, verified on read</text>
+  <text class="t" x="880" y="224">Evidence bundles: manifest, validation,</text>
+  <text class="t" x="880" y="242">import, Ed25519 signatures, trust store</text>
+  <text class="t" x="880" y="266">Launcher: starts the configured runner</text>
+  <text class="t" x="880" y="284">with fixed arguments only</text>
+  <text class="t" x="880" y="318">Reads event stores; never writes them.</text>
+
+  <!-- runner -->
+  <rect class="box priv" x="860" y="430" width="300" height="170" rx="10"/>
+  <text class="h" x="880" y="462">orbit-reliability</text>
+  <text class="m" x="880" y="484">separate binary, built with</text>
+  <text class="m" x="880" y="500">feature "reliability"</text>
+  <text class="t" x="880" y="524">The only program with fault hooks.</text>
+  <text class="t" x="880" y="542">Catalog scenarios; child processes</text>
+  <text class="t" x="880" y="560">abort, are killed or paused, in</text>
+  <text class="t" x="880" y="578">work directories it creates.</text>
+
+  <!-- storage -->
+  <rect class="store" x="430" y="540" width="340" height="60" rx="8"/>
+  <text class="m" x="450" y="566">orbit.db   SQLite (WAL), store schema v3</text>
+  <text class="m" x="450" y="586">events · snapshots · replay runs</text>
+  <rect class="store" x="430" y="620" width="340" height="80" rx="8"/>
+  <text class="m" x="450" y="646">lab/lab.db   registry schema v4</text>
+  <text class="m" x="450" y="666">lab/artifacts/sha256/…   lab/locks/</text>
+  <text class="m" x="450" y="686">lab/*-work/   (removed after each run)</text>
+  <rect class="store" x="40" y="430" width="300" height="70" rx="8"/>
+  <text class="m" x="60" y="458">bundle.json (portable evidence)</text>
+  <text class="m" x="60" y="478">manifest · optional signatures</text>
+
+  <!-- arrows -->
+  <path class="a" d="M340 115 H426"/>
+  <text class="l" x="350" y="105">HTTP</text>
+  <path class="a" d="M600 230 V296"/>
+  <path class="a" d="M770 120 H856"/>
+  <path class="a" d="M860 300 C820 330 800 360 774 380"/>
+  <text class="l" x="778" y="290">public API</text>
+  <path class="a" d="M340 310 C600 260 700 260 856 230"/>
+  <path class="w" d="M1010 340 V426"/>
+  <text class="l" x="1018" y="370" fill="#d9a93f">spawns only when</text>
+  <text class="l" x="1018" y="386" fill="#d9a93f">a runner is</text>
+  <text class="l" x="1018" y="402" fill="#d9a93f">configured</text>
+  <path class="a" d="M600 470 V536"/>
+  <path class="a" d="M860 560 C820 640 800 660 774 660"/>
+  <path class="a" d="M860 300 C840 500 820 600 774 640"/>
+  <path class="a" d="M190 370 V426"/>
+  <text class="l" x="200" y="404">export · import</text>
+</svg>

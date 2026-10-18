@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="t">
+  <title id="t">ORBIT mark: events on an orbit, one replay point highlighted</title>
+  <rect width="128" height="128" rx="28" fill="#0b0d10"/>
+  <!-- the orbit: an ordered, append-only history -->
+  <circle cx="64" cy="64" r="38" fill="none" stroke="#2f3843" stroke-width="6"/>
+  <path d="M64 26 A38 38 0 1 1 26.9 72.1" fill="none" stroke="#5cb8ff" stroke-width="6" stroke-linecap="round"/>
+  <!-- events, chained -->
+  <g fill="#0b0d10" stroke="#5cb8ff" stroke-width="4">
+    <circle cx="64" cy="26" r="7"/>
+    <circle cx="100.1" cy="52.3" r="7"/>
+    <circle cx="86.3" cy="94.7" r="7"/>
+  </g>
+  <!-- the point being replayed -->
+  <circle cx="26.9" cy="72.1" r="9" fill="#3fb68b"/>
+  <circle cx="64" cy="64" r="5" fill="#e4e8ee"/>
+</svg>
