@@ -26,6 +26,9 @@ curl http://127.0.0.1:7878/api/v1/health
 | `ORBIT_API_ALLOWED_HOSTS` | none | Extra host names accepted in the `Host` header, comma-separated. `localhost`, `127.0.0.1` and `[::1]` are always accepted. |
 | `ORBIT_API_REQUEST_TIMEOUT_SECS` | `30` | Per-request deadline (1–600 s). Requests over it get `503 request_timeout`. |
 | `ORBIT_LAB_DIR` | `data/lab` | Lab directory: the experiment registry `lab.db` and artifacts. Created on first start. Separate from the event store. An empty value disables the lab endpoints (`503 lab_unavailable`). |
+| `ORBIT_RELIABILITY_RUNNER` | unset | Absolute path to a separately built `orbit-reliability` executable. Set, it enables `POST /lab/reliability/runs`; unset, launching is disabled (`503 reliability_runner_disabled`). The API binary itself never contains fault-injection code. |
+| `ORBIT_RELIABILITY_TIMEOUT_SECS` | `900` | Deadline of one launched reliability run (1–3600 s). The runner and its child processes are then killed and the run is recorded as an infrastructure failure. |
+| `ORBIT_TRUSTED_KEYS` | unset | A trusted-keys file ([EVIDENCE.md](EVIDENCE.md#signatures-and-trust)). Unset, no bundle signature is trusted: signed bundles are reported `signed_untrusted`. |
 | `ORBIT_DURABILITY`, `ORBIT_BUSY_TIMEOUT_MS`, `ORBIT_MAX_PAYLOAD_BYTES`, `ORBIT_MAX_METADATA_BYTES` | see [DEVELOPMENT.md](DEVELOPMENT.md#configuration) | Store settings |
 | `RUST_LOG` | `info,tower_http=info` | Log filter |
 
@@ -131,12 +134,14 @@ Responses are the lab's own serialized records.
 | `GET /lab/experiments/{id}/bundle?history=` | The experiment as an evidence bundle: `application/json` attachment `orbit-evidence-<id>.json`, digest in `X-Orbit-Bundle-Digest`. A differential replay's input events are included while the store still holds the pinned history, unless `history=false` ([EVIDENCE.md](EVIDENCE.md)) | 200 | 404, 409 `invalid_state` (not finished, or larger than 32 MiB), 500 `integrity_violation` (damaged artifacts are never exported) |
 | `GET /lab/performance/workloads` | Workload catalog with bounds, iteration bounds, default regression policy, the server's build profile and whether a measurement is running | 200 | 503 |
 | `POST /lab/performance/compare` | `{baseline?, candidates: [id…] (1–10), threshold_percent?, alpha?}`. Compares completed performance experiments; nothing is stored. Without `baseline`, the newest compatible earlier one is used, or `status: "no_baseline"` ([PERFORMANCE.md](PERFORMANCE.md)) | 200 | 400 `invalid_parameter`, 404, 409 `invalid_state` (not a completed performance experiment) |
-| `POST /lab/bundles/validate` | Body: the bundle file (raw bytes, at most 32 MiB). Validates without storing; always 200 with the report (`valid`, `errors[].code`, `integrity`, `scientific_correctness: "not_verified"`, `history`) | 200 | 413 |
+| `POST /lab/performance/compare-runs` | `{baseline: [id…], candidates: [id…] (1–20 each), threshold_percent?, alpha?}`. Compares sets of independent runs on their per-run medians, with between-run spread, an exact test for small counts, and the smallest p-value the counts allow | 200 | 400 `invalid_parameter`, 422 `invalid_body` (unknown fields), 404, 409 |
+| `POST /lab/bundles/validate` | Body: the bundle file (raw bytes, at most 32 MiB). Validates without storing; always 200 with the report (`valid`, `errors[].code`, `integrity`, `scientific_correctness: "not_verified"`, `history`, and `authenticity`: `unsigned`, `signed_untrusted` or `trusted`, judged only against `ORBIT_TRUSTED_KEYS`) | 200 | 413 |
 | `POST /lab/bundles` | Body: the bundle file. Validates and imports; never creates or changes a local experiment | 201 (new), 200 (already imported) | 413, 422 `invalid_bundle` (report in `details`; nothing stored) |
 | `GET /lab/bundles?before=&limit=` | Imported bundles, newest first, with a cursor | 200 | 400 |
 | `GET /lab/bundles/{digest}` | Manifest, document (without entry contents), import-time validation report, reproduction attempts | 200 | 400 `invalid_bundle_digest`, 404 `bundle_not_found` |
 | `POST /lab/bundles/{digest}/reproduce` | Reproduces an imported bundle and appends the attempt: differential replays over the bundle's verified events (201); performance bundles are measured again in the background (202); reliability `unsupported`, failed `not_reproducible` | 201, 202 | 404, 409 `measurement_in_progress` |
-| `GET /lab/reliability/scenarios` | The reliability scenario catalog, read-only ([RELIABILITY.md](RELIABILITY.md)). They run only with the `orbit-reliability` tool; their results are ordinary experiments here (`kind: "reliability"`). | 200 | 503 `lab_unavailable` |
+| `GET /lab/reliability/scenarios` | The reliability scenario catalog and `runner`: `{enabled: false, reason}` or `{enabled: true, timeout_secs, busy}` ([RELIABILITY.md](RELIABILITY.md)). Results are ordinary experiments (`kind: "reliability"`). | 200 | 503 `lab_unavailable` |
+| `POST /lab/reliability/runs` | Body: a reliability spec `{scenario, scenario_version?, parameters?}` (catalog scenarios only; unknown fields and out-of-range parameters are refused). Records it and starts the configured runner process on it with fixed arguments (`--lab <lab dir> run-id <id>`); responds with the experiment in status `created`. One run at a time. | 202 | 400 `invalid_spec`, 409 `reliability_run_in_progress`, 503 `reliability_runner_disabled` |
 | `GET /lab/experiments/{id}/trace?from=&limit=` | Per-boundary trace of a completed experiment: `{boundary, left, right, equal}` read from the verified trace artifacts, with a cursor (`next_from`) | 200 | 400 `invalid_parameter` (limit 1–500), 404, 409 `invalid_state` (not completed), 500 `integrity_violation` (trace artifact missing or corrupted) |
 
 Experiment records include `identity` (declared, configuration and build
@@ -145,10 +150,12 @@ identity, `completeness` and `gaps`). Results recorded since Sprint 8
 `semantics`; older results are returned as stored. See [LAB.md](LAB.md).
 
 `POST /lab/experiments` accepts `differential_replay` and `performance`. A
-request with `kind: "reliability"` gets `400 unsupported_experiment_kind`,
-because reliability scenarios inject faults and kill processes. Listing,
-inspecting, verifying and exporting reliability experiments works like any
-other kind; reproducing one through the API returns `409 invalid_state`.
+request with `kind: "reliability"` gets `400 unsupported_experiment_kind`:
+this server never runs a scenario itself. With a configured runner,
+`POST /lab/reliability/runs` launches one in that separate process.
+Listing, inspecting, verifying and exporting reliability experiments works
+like any other kind; reproducing one through the API returns
+`409 invalid_state` (use `orbit-reliability reproduce`).
 
 **Execution and cancellation.**
 - **Differential replays** run synchronously. If one outlasts the request
@@ -158,9 +165,17 @@ other kind; reproducing one through the API returns `409 invalid_state`.
   bundle reproductions) run on one background thread per server, one at a
   time; a second request gets `409 measurement_in_progress` and records
   nothing. The registry is the only source of status: poll the experiment.
-- **Nothing can be cancelled.** A request timeout does not stop work. If the
-  server stops during a measurement, the experiment stays `running` and is
-  marked `failed`/`interrupted` the next time the lab is opened.
+- **Reliability runs** execute in the separate runner process, one at a time
+  per server, with a deadline (`ORBIT_RELIABILITY_TIMEOUT_SECS`) after which
+  the runner and its children are killed and the run is recorded as an
+  infrastructure failure. A runner that exits without starting the
+  experiment is also an infrastructure failure; one that dies mid-run leaves
+  it `interrupted`. Finished records are never changed. If the API stops, a
+  runner that already started continues and records its result.
+- **Nothing can be cancelled by a client.** A request timeout does not stop
+  work. If the server stops during a measurement, the experiment stays
+  `running` and is marked `failed`/`interrupted` the next time the lab is
+  opened.
 - Measurements started here run inside the server process, so concurrent
   requests can disturb them; [PERFORMANCE.md](PERFORMANCE.md) describes how
   to measure with the CLI.

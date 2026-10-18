@@ -39,9 +39,13 @@ Audited state: `main` at `7cc2cae`, tag `v0.1.0`, on 2026-10-18.
 > - **Shared reproduction statuses.**
 > - **Observatory:** Performance and Evidence pages.
 >
-> Reliability scenarios remain runnable only from the `orbit-reliability`
-> tool, never the API (§9). This document is kept as the plan it was; the
-> linked documents describe what exists.
+> Phase 10 completed it: reliability scenarios can be launched from the
+> Observatory, but they still execute only in the separately built
+> `orbit-reliability` tool, which the API starts when an operator configures
+> it (the API itself never injects faults, §9). It also added optional
+> bundle signatures, exact small-sample tests and comparisons of
+> independent runs. This document is kept as the historical plan; the
+> linked documents describe what exists (release v0.2.0).
 
 ## 1. Verified repository and release state
 

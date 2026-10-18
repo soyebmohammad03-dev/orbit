@@ -36,6 +36,28 @@ cargo run --release -p orbit-lab -- measure historical-reconstruction --iteratio
 cargo run -p orbit-lab -- compare <candidate id>     # against the newest compatible baseline
 cargo run -p orbit-lab -- export <id> --out bundle.json   # see EVIDENCE.md
 cargo run -p orbit-lab -- validate bundle.json
+cargo run -p orbit-lab -- keygen --key-id me --out key.json --public-out trusted-keys.json
+cargo run -p orbit-lab -- sign bundle.json --key key.json --out signed.json
+cargo run -p orbit-lab -- compare-runs --baseline ID,ID,ID --candidate ID,ID,ID
+scripts/validate-workflow.sh                  # every subsystem end to end on a fresh data directory (43 checks)
+```
+
+Dependency audit (as in CI; `cargo-audit` installs once with
+`cargo install cargo-audit --locked`):
+
+```bash
+cargo audit
+```
+
+```bash
+cd web && npm audit --omit=dev
+```
+
+Screenshots for the README (after `scripts/validate-workflow.sh /tmp/orbit-demo
+--keep` and `cd web && npm run build && npm run start`):
+
+```bash
+cd web && node scripts/screenshots.mjs
 ```
 
 The lab reads `data/orbit.db` and keeps its registry in `data/lab` (override
@@ -52,14 +74,18 @@ cd web && npm run format:check && npm run lint && npm run typecheck && npm test 
 cd web && npm run test:e2e                   # starts its own API and production web server on ports 7879/3100
 ```
 
-CI (`.github/workflows/ci.yml`) has three jobs:
+CI (`.github/workflows/ci.yml`) has four jobs:
 
 1. **Rust** (Ubuntu and macOS): everything below, for all three crates.
 2. **Web**: Prettier, ESLint with zero warnings, `tsc`, Vitest, and the
    production build.
 3. **End-to-end**: builds `orbit-api` and checks that the binary contains no
    reliability child code, then installs Chromium and runs the Playwright
-   workflows against a fresh event store and lab registry.
+   workflows against a fresh event store and lab registry. The API is
+   started with the separately built `orbit-reliability` runner configured,
+   so a scenario is launched from the Observatory.
+4. **Dependency audit**: `cargo audit` (RustSec advisory database) and
+   `npm audit --omit=dev`.
 
 The Rust job runs, with `--locked`, on Ubuntu and macOS:
 
@@ -116,6 +142,9 @@ is a smoke test, not a measurement.
 | `orbit-lab` `tests/performance.rs` | Every workload through the lab, samples matching the summary, persistence, invalid specs recording nothing, infrastructure failures without results, baselines (none, found, given), incompatible seeds, linked reproduction leaving the original unchanged. No assertion depends on machine speed |
 | `orbit-lab` `tests/abandonment.rs` | Creation locks: live creators keep their experiments, dropped creators abandon them exactly once, released and started experiments are never abandoned, experiments without a lock file are left alone |
 | `orbit-lab` `tests/bundles.rs` and `src/bundle.rs` unit tests | Base64 against RFC 4648 vectors, entry-name rules, nesting, garbage input; round trip with deterministic bytes; exact reproduction in a lab without the original store; missing and changed histories; tampering (entries, record, result, events, unlisted, missing, unknown fields); a consistent forgery that validates and then fails reproduction; path traversal; performance, failed and reliability bundles; the committed fixtures; a 512-case single-byte property test |
+| `orbit-lab` `tests/launcher.rs` | The reliability launcher with the real runner: configuration checks, fixed arguments only, invalid requests recording nothing, a completed run, a runner that never starts, a hung runner killed with its child processes at the deadline, six concurrent launches admitting one, a completed result untouched by a later failure |
+| `orbit-api` `tests/reliability_runs.rs` | Launching through the API: disabled by default, only catalog specs with bounded parameters (commands, paths and arguments refused), infrastructure failures, one run at a time |
+| `orbit-lab` `src/signing.rs` unit tests and `tests/bundles.rs` `signatures` | Ed25519 signatures: valid, trusted, untrusted, impostor key id, altered after signing, malformed, unknown fields, trust-store errors, key-file permissions and no-overwrite, import and re-validation |
 | `orbit-api` `tests/evidence.rs` | Background performance runs, comparison, kind filter, linked reproduction, invalid requests, one measurement at a time, bundle export headers, validation, import (201/200/422), reproduction, digests, the bundle routes' own size limit |
 | `web/tests/unit`            | API client (URLs, bodies, error envelope, network errors, timing header), formatters, DiffView, ErrorState and EmptyState, navigation, the Overview page's loading, empty, data, error/retry and unrun-check states |
 | `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API; a differential replay run, inspected, verified and reproduced from the Experiments page, which must fit a 375 px screen; two performance measurements compared and inspected (Performance page at 375 px); a bundle downloaded from Experiments, validated, imported and reproduced on the Evidence page, and a tampered copy refused |

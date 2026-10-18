@@ -4,7 +4,59 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-18
+
+The lab release: experiments, reliability, performance and evidence on top
+of the 0.1.0 event store, integrated into one platform. Phase 10 (below)
+closed the remaining gaps and audited the whole system.
+
+### Added: Phase 10, final audit and release
+
+- **Reliability runs from the Observatory, through a separate runner.**
+  - `POST /lab/reliability/runs` accepts catalog specs only. It records the
+    experiment, then starts the separately built `orbit-reliability` with
+    fixed arguments (`--lab <dir> run-id <id>`).
+  - Enabled only by `ORBIT_RELIABILITY_RUNNER`; one run at a time; a
+    deadline (`ORBIT_RELIABILITY_TIMEOUT_SECS`) kills the runner's process
+    group.
+  - Afterwards, runs the runner left unfinished are recorded as
+    infrastructure failures or interrupted; finished records are never
+    changed.
+  - The API binary still contains no fault-injection code.
+  - New: the `run-id` command and `reliability::launcher`.
+- **Optional Ed25519 bundle signatures** (`ed25519-dalek`).
+  - `keygen`, `sign`, and `--trusted-keys` on `validate` and `import`;
+    `ORBIT_TRUSTED_KEYS` for the API.
+  - Authenticity (`unsigned`, `signed_untrusted`, `trusted`) is reported
+    apart from integrity.
+  - Invalid or malformed signatures invalidate a bundle; no key is trusted
+    automatically.
+- **Statistics.**
+  - Exact Mann–Whitney p-values for tie-free samples of up to 50 values.
+  - `compare-runs` (CLI, API, library) compares sets of independent runs on
+    their per-run medians, reporting the between-run spread and the
+    smallest achievable p-value.
+  - Results record which process measured them and the untimed overhead.
+- **Validation and presentation.**
+  - `scripts/validate-workflow.sh`: 43 checks of every subsystem through
+    the public API and CLIs on a fresh data directory.
+  - A dependency-audit CI job (`cargo audit`, `npm audit --omit=dev`).
+  - Real screenshots captured by a script that also checks console errors,
+    failed requests, overflow and unnamed controls.
+  - New brand assets and an architecture diagram; a rewritten README.
+
+### Fixed: Phase 10
+
+- A reliability child that appends continuously no longer outlives a
+  killed parent: it exits when its stdout pipe closes (regression test).
+- Work directories of killed measurements and scenarios were never
+  removed; `Lab::open` now removes them once the experiment is no longer
+  running (regression test).
+- The experiment list in the Observatory blanked and reloaded on every
+  refresh; it now keeps its rows, and refreshes when background work ends.
+- Badges wrapped and overlapped in narrow table cells.
+- The README example, compiled as a doctest, wrote a database into the
+  working directory when run; it is now `no_run`.
 
 ### Added: Phase 9, integrated platform
 

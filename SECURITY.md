@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-ORBIT is pre-release software. The current release is `v0.1.0`. Only the
-latest commit on `main` gets fixes.
+The current release is `v0.2.0` (0.x: no API stability guarantee). Only
+the latest commit on `main` gets fixes.
 
 ## Reporting a vulnerability
 
@@ -28,10 +28,11 @@ affected commit.
   | Cross-site requests from other origins | CORS for configured origins only, GET/POST only. JSON-only `POST` bodies force a preflight, so cross-site form posts are rejected before any write. | `tests/hardening.rs`, `tests/api.rs` |
   | Oversized or unbounded requests | Body limit, page-size and interval caps, replay cap, per-request deadline, SQLite busy timeout | `tests/api.rs`, `tests/hardening.rs` |
   | Information disclosure | No SQL or file paths from clients. Errors contain no local paths. Benchmark files are read only from the configured directory, never a client-supplied path, and symlinks are not followed. | `tests/hardening.rs`, `benchmarks.rs` tests |
-  | Fault injection reachable from the API | Fault hooks exist only with `orbit-core/fault-injection` and `orbit-lab/reliability`, which `orbit-api` never enables; reliability scenarios run only through the separately built `orbit-reliability` tool; the API rejects `kind: reliability` and has no route that injects faults; nothing reads environment variables to enable a hook | `orbit-api` `tests/lab.rs`; CI checks the API's feature graph and its binary |
+  | Fault injection reachable from the API | Fault hooks exist only with `orbit-core/fault-injection` and `orbit-lab/reliability`, which `orbit-api` never enables; scenarios execute only in the separately built `orbit-reliability` tool; the API rejects `kind: reliability` and has no route that injects faults; nothing reads environment variables to enable a hook | `orbit-api` `tests/lab.rs`; CI checks the API's feature graph and searches its binary for child-process code |
+  | Launching the reliability runner from a browser | Disabled unless an operator sets `ORBIT_RELIABILITY_RUNNER` to an absolute path; the executable path is configuration, never request data; requests are catalog specs only (unknown fields, scenarios and out-of-range parameters refused, nothing recorded); the runner gets fixed arguments (`--lab <dir> run-id <id>`), no shell; one run at a time; a deadline kills the runner's process group; a client cannot name, signal or kill any process or file | `orbit-lab` `tests/launcher.rs`, `orbit-api` `tests/reliability_runs.rs`, `web/tests/e2e/reliability.spec.ts` |
   | Lab requests naming files | Experiment specs reject unknown fields; artifact paths are derived only from SHA-256 digests; the lab never writes to the event store, and its registry is a separate database | `orbit-lab` `tests/registry.rs`, `orbit-api` `tests/lab.rs` |
   | Malicious evidence bundles (oversized, deeply nested, truncated, path traversal, unexpected fields, forged digests) | Raw-byte upload with its own 32 MiB limit; nesting depth checked before parsing; exact fields and canonical form; strict entry-name pattern; entry count and size limits; strict base64; every digest and the event chain recomputed before anything is trusted; entries stored only by content digest, never by name; nothing in a bundle is ever executed; invalid bundles are never imported; imports never touch local experiments | `orbit-lab` `src/bundle.rs` unit tests, `tests/bundles.rs` (fixtures, single-byte property test), `orbit-api` `tests/evidence.rs` |
-  | Substituted or forged bundles | Not prevented: bundles are unsigned. A consistent forgery validates under a **new** bundle digest; compare the digest with one from a trusted source, and reproduce. Documented in docs/EVIDENCE.md | `tests/bundles.rs` (`a_consistent_forgery_…`) |
+  | Substituted or forged bundles | Integrity alone cannot prevent this: a consistent forgery validates under a **new** bundle digest. Optional Ed25519 signatures (`ed25519-dalek`, strict verification) over the bundle digest; invalid or malformed signatures make a bundle invalid; a signature counts only for a key id **and** public key in an explicitly configured trust store (`--trusted-keys`, `ORBIT_TRUSTED_KEYS`), otherwise `signed_untrusted`; keys are never trusted automatically; key files are written owner-only and never overwritten, and the secret is never printed or embedded | `tests/bundles.rs` (`a_consistent_forgery_…`, `signatures::…`), `src/signing.rs` tests, `tests/cli.rs`, `orbit-api` `tests/evidence.rs` |
   | Resource exhaustion through measurements | Every performance spec field is bounded and unknown fields are rejected; one background measurement per server (409 otherwise); work directories are inside the lab directory and removed afterwards | `orbit-lab` `tests/performance.rs`, `orbit-api` `tests/evidence.rs` |
 
   These mitigations reduce the risk on a developer machine. They are not a
@@ -42,9 +43,11 @@ affected commit.
   every digest consistently. Checkpoints kept outside the database detect such
   a rewrite up to the checkpoint. The full threat model is in
   [docs/RECOVERY.md](docs/RECOVERY.md#integrity-threat-model).
-- Dependency advisories: the production dependency trees have no known
-  vulnerabilities (`npm audit --omit=dev` reports 0). `npm audit` reports one
-  **development-only** chain:
+- Dependency advisories, checked for v0.2.0 on 2026-10-18 and on every CI
+  run: `cargo audit` (RustSec advisory database, 1,338 advisories, 247
+  crates in `Cargo.lock`) reports **0 vulnerabilities**; `npm audit
+  --omit=dev` reports **0** for the web's production dependencies. `npm
+  audit` reports one **development-only** chain:
   `eslint-config-next → @next/eslint-plugin-next → fast-glob → micromatch → braces`,
   GHSA-vfj7-8cjw-p6xm. It is a denial-of-service issue triggered by
   pathological glob patterns given to the linter. Every `braces` version is

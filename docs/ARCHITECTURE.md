@@ -196,26 +196,38 @@ Smaller choices:
   `read_after`, `event` and `head` methods. Phase 2 only added snapshot
   methods to `EventStore`, plus migration 2.
 
-## Extension points for later work
+## The laboratory and the final architecture
 
-All five phases are complete (`v0.1.0`). The next program, a lab for
-differential replay, reliability experiments, statistical benchmarks and
-evidence bundles, is planned in [ATLAS_INTEGRATION.md](ATLAS_INTEGRATION.md).
-Sprints 7–9 and Phase 9 implemented it in `orbit-lab` ([LAB.md](LAB.md)):
+![ORBIT architecture](assets/architecture.svg)
 
-```text
-                 ┌──────────────── orbit-lab ─────────────────┐
- orbit-core ◀────│ registry (lab.db, v4) · artifacts (sha256)  │◀── orbit-api (/lab/*) ◀── Observatory
- (read only)     │ kinds: differential_replay · performance ·  │
-                 │        reliability (orbit-reliability only) │◀── orbit-lab / orbit-reliability CLIs
-                 │ reproduction (ReproductionStatus) · bundles │
-                 └─────────────────────────────────────────────┘
-```
+The lab was planned in [ATLAS_INTEGRATION.md](ATLAS_INTEGRATION.md) (kept as
+the historical plan) and built in `orbit-lab` ([LAB.md](LAB.md)). The
+boundaries:
+
+- **`orbit-core` knows nothing of the lab.** `orbit-lab` uses only its
+  public API, reads event stores and never writes them. Its registry
+  (`lab.db`, schema v4) is a separate database. `orbit-core` was not changed
+  to build the lab.
+- **One experiment model.** Differential replay, performance and
+  reliability experiments share the registry, its database-enforced
+  lifecycle, creation and run locks (no clocks or leases), immutable
+  results, content-addressed artifacts, append-only verifications and one
+  set of reproduction statuses.
+- **Two processes for fault injection.** Only `orbit-reliability`, built
+  with the `reliability` feature, contains fault hooks. `orbit-api` is built
+  without it (checked in CI) and can only start that executable, with fixed
+  arguments, when an operator configures it.
+- **Evidence leaves and re-enters as data.** A bundle is canonical JSON
+  verified before use. Imported bundles live apart from local experiments,
+  and nothing in them is executed.
 
 Differential replay is in [LAB.md](LAB.md), reliability in
 [RELIABILITY.md](RELIABILITY.md), performance in
 [PERFORMANCE.md](PERFORMANCE.md) and evidence bundles in
-[EVIDENCE.md](EVIDENCE.md). `orbit-core` was not changed for any of them.
-Still out of scope: a read-connection pool
-behind `EventStore` (only if multi-user API load ever matters), and OS-crash
-and power-loss testing, which would need a VM-level harness.
+[EVIDENCE.md](EVIDENCE.md).
+
+**Deliberately out of scope:**
+- a read-connection pool behind `EventStore` (only relevant if multi-user
+  API load ever matters);
+- multi-host operation and authentication (ORBIT is a local tool);
+- OS-crash and power-loss testing, which would need a VM-level harness.

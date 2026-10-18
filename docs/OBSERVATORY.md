@@ -58,19 +58,33 @@ scripts/seed-demo.sh
 | Experiments (Phase 9 additions) | Performance results: every sample as a chart in iteration order with the median, the statistics that were computed (and a list of those not computed and why), throughput, environment, configuration digest, warm-up samples and limitations; a smoke label with its reasons. An **Export bundle** link for finished experiments. Reproduction of a performance experiment starts a linked measurement and shows it until its result is appended. Verification statuses use one set of labels for every kind. | `GET …/bundle`, `POST …/reproduce` |
 | Evidence (Phase 9) | Validate or import a bundle file: valid/invalid, integrity, "scientific correctness not verified", history status, replayability, every error code; a rejected import says nothing was imported. Imported bundles with cursor pagination; a bundle's entries, exporter, history and reproduction attempts, with a Reproduce button (a performance bundle is measured again in the background). | `/api/v1/lab/bundles*` |
 
+**Reliability runs (Phase 10).** When the API has a runner configured, the
+reliability catalog on **Experiments** offers a form with the catalog's
+scenarios and bounded parameters; the launched experiment is followed
+through its real lifecycle (created, running, then its cases). Otherwise the
+card says launching is disabled and shows how to enable it. Performance
+results show which process measured them and the orchestration overhead;
+evidence pages show authenticity (unsigned, signed by an untrusted key, or
+by a trusted key) apart from integrity.
+
 The navigation groups the pages into **Event store** (Overview, Streams,
 Events, Time Travel, Snapshots, Integrity) and **Lab** (Replay Lab,
 Experiments, Performance, Evidence, Benchmarks).
 
 ### Screenshots
 
-These were captured from the running application, with data from
-`scripts/seed-demo.sh`.
+Captured from the running application (production build) by
+[`web/scripts/screenshots.mjs`](../web/scripts/screenshots.mjs), after
+[`scripts/validate-workflow.sh --keep`](../scripts/validate-workflow.sh)
+produced every record through the real API. The script fails on console
+errors, failed requests, horizontal overflow or unnamed controls.
 
 | | |
 |---|---|
-| ![Overview](screenshots/overview.png) | ![Time travel](screenshots/time-travel.png) |
-| ![Replay Lab](screenshots/replay-lab.png) | ![Integrity](screenshots/integrity.png) |
+| ![Overview](assets/screenshots/overview.png) | ![Time travel](assets/screenshots/time-travel.png) |
+| ![Integrity](assets/screenshots/integrity.png) | ![Differential replay](assets/screenshots/differential-replay.png) |
+| ![Reliability](assets/screenshots/reliability.png) | ![Performance](assets/screenshots/performance.png) |
+| ![Evidence](assets/screenshots/evidence.png) | ![Phone width](assets/screenshots/mobile-experiments.png) |
 
 ## A complete workflow
 

@@ -30,6 +30,44 @@ corruption cases, which edit only the scenario's own copies.
 The scenarios also run in the test suite (`crates/orbit-lab/tests/reliability.rs`),
 on Linux and macOS in CI.
 
+### From the Observatory or the API (a configured runner)
+
+The API never runs a scenario itself, and its binary contains no
+fault-injection code. It can **start** the separately built runner:
+
+```bash
+cargo build -p orbit-lab --features reliability --bin orbit-reliability
+```
+
+```bash
+ORBIT_RELIABILITY_RUNNER="$PWD/target/debug/orbit-reliability" cargo run -p orbit-api
+```
+
+The **Experiments** page then offers a form for the catalog's scenarios and
+their bounded parameters. Without the variable, the page says launching is
+disabled, shows how to enable it, and gives the command to run the tool
+directly. The boundary (`orbit_lab::reliability::launcher`):
+
+| Rule | How it is enforced |
+|---|---|
+| Disabled by default | Only an operator's `ORBIT_RELIABILITY_RUNNER` (an absolute path to an existing file) enables it; otherwise `503 reliability_runner_disabled` |
+| Only catalog scenarios | The body is a reliability spec: unknown scenarios, unknown fields (a command, a path, arguments) and out-of-range parameters are `400`, and nothing is recorded |
+| No client text on a command line | The API records the validated spec as a `created` experiment first, then runs `<runner> --lab <lab dir> run-id <id>`, with no shell; the runner reads the spec from the registry |
+| One run at a time | A second request is `409 reliability_run_in_progress` and records nothing |
+| Bounded time | After `ORBIT_RELIABILITY_TIMEOUT_SECS` (default 900) the runner's whole process group is killed |
+| Honest lifecycle | Afterwards the API records what the runner left undone: never started → failed/`infrastructure`; timed out while running → failed/`infrastructure`; died while running → failed/`interrupted`. A completed or failed record is never changed. Work directories and lock files of killed runs are removed |
+| No orphans | A scenario child exits when its parent's pipe closes, so a killed runner leaves no child appending in the background |
+| Imported data never runs | Bundles and stored experiments cannot start a run; only this route can, with a catalog spec |
+
+Tests: `crates/orbit-lab/tests/launcher.rs` (real runner, a hung runner
+killed with its child processes, a runner that never starts, six concurrent
+launches admitting exactly one, fixed arguments),
+`crates/orbit-api/tests/reliability_runs.rs` (disabled by default, request
+validation, lifecycle, one at a time), the end-to-end test
+`web/tests/e2e/reliability.spec.ts` (a scenario launched from the
+Observatory and run by the real runner), and the CI checks that `orbit-api`
+neither enables the feature nor contains child-process code.
+
 ## Catalog
 
 Only these scenarios exist. Parameters are bounded integers, and anything

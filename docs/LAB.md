@@ -1,14 +1,19 @@
-# The ORBIT lab: experiment registry and differential replay
+# The ORBIT lab: experiments, evidence and reproduction
 
-`crates/orbit-lab` adds the first part of the lab planned in
-[ATLAS_INTEGRATION.md](ATLAS_INTEGRATION.md):
+`crates/orbit-lab` is the laboratory built on the event store:
 
-- an **experiment registry** in its own SQLite database;
-- a content-addressed **artifact store**;
+- an **experiment registry** in its own SQLite database, with one enforced
+  lifecycle for every kind and recovery of interrupted and abandoned runs;
+- a content-addressed **artifact store**, verified on every read;
 - **implementation identities** that tell apart two projection
   implementations sharing a name and version;
 - **differential replay**: two implementations over one ordered history,
-  with first-divergence diagnosis.
+  with first-divergence diagnosis (this document);
+- **reliability** scenarios ([RELIABILITY.md](RELIABILITY.md)), the
+  **performance** lab ([PERFORMANCE.md](PERFORMANCE.md)) and **evidence
+  bundles** with optional signatures ([EVIDENCE.md](EVIDENCE.md));
+- a **launcher** that starts the separately built reliability runner for
+  the API ([RELIABILITY.md](RELIABILITY.md#from-the-observatory-or-the-api-a-configured-runner)).
 
 It is exposed through a library, an `orbit-lab` CLI, API endpoints and
 the Observatory's **Experiments**, **Performance** and **Evidence** pages.
@@ -208,7 +213,12 @@ which is never abandoned automatically. Experiments created by versions
 without creation locks have no file either and are left alone.
 
 Dropping a `Lab` without running what it created releases the locks. The
-next recovery then marks those experiments abandoned. Tests:
+next recovery then marks those experiments abandoned.
+
+**Work directories.** A performance measurement or reliability scenario
+works in `<lab>/performance-work/<id>/` or `<lab>/reliability-work/<id>/`
+and removes it when it ends. If its process is killed, `Lab::open` removes
+the directory once the experiment is no longer `running`. Tests:
 `tests/abandonment.rs`, plus the real-process case
 `experiment_created/process_killed`.
 

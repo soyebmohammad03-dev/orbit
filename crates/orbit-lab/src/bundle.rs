@@ -50,10 +50,13 @@
 //! *Integrity*: the bundle is internally consistent: every digest matches
 //! its content, and any change to the content changes the bundle digest.
 //! It is tamper-evident **relative to a bundle digest obtained from a
-//! trusted channel**: it is not authenticated (there is no signature, so
-//! anyone can build a consistent bundle, under a new digest), and it says
-//! nothing about scientific correctness. Reproduction ([`Lab::reproduce_bundle`]) is the step that
-//! re-executes the experiment, where this platform can.
+//! trusted channel**: anyone can build a consistent bundle, under a new
+//! digest. *Authenticity* is separate: optional signatures
+//! ([`crate::signing`]) count only for keys in a trust store the verifier
+//! configured, and the report says `unsigned`, `signed_untrusted` or
+//! `trusted`. Neither says anything about scientific correctness.
+//! Reproduction ([`Lab::reproduce_bundle`]) is the step that re-executes
+//! the experiment, where this platform can.
 
 use std::collections::BTreeMap;
 
@@ -100,7 +103,7 @@ pub const MEDIA_TYPES: [&str; 3] = ["application/octet-stream", "application/jso
 
 /// Limitations recorded in every bundle.
 pub const LIMITATIONS: &[&str] = &[
-    "a valid bundle is internally consistent (every digest matches) and its bundle digest identifies its content; it is not signed, so compare that digest with one from a trusted source to detect a substituted bundle",
+    "a valid bundle is internally consistent (every digest matches) and its bundle digest identifies its content; unless it is signed by a key you trust, compare that digest with one from a trusted source to detect a substituted bundle",
     "integrity is not scientific correctness: reproduction re-executes the experiment where this platform can",
     "a matching executable digest identifies the same binary, not semantically equivalent code",
 ];
@@ -977,7 +980,7 @@ impl Lab {
             history,
             provenance: json!({
                 "exported_from": "orbit-lab",
-                "integrity": "every entry and the document are covered by the manifest digests; not signed",
+                "integrity": "every entry and the document are covered by the manifest digests; signatures, if added later, are reported separately as authenticity",
                 "local_paths": "none: entries are addressed by name and digest only",
             }),
             limitations: LIMITATIONS.iter().map(|s| (*s).to_owned()).collect(),

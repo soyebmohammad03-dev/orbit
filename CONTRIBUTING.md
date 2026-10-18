@@ -1,7 +1,8 @@
 # Contributing to ORBIT
 
-Thanks for your interest. ORBIT is being built in phases (see the
-[README](README.md#roadmap)); contributions should fit the current phase.
+Thanks for your interest. ORBIT is complete in the scope described in the
+[README](README.md); contributions that fix defects, sharpen guarantees or
+improve the evidence behind a claim are the most welcome.
 
 ## Before you open a pull request
 
@@ -11,16 +12,24 @@ Thanks for your interest. ORBIT is being built in phases (see the
 
    ```bash
    cargo fmt --all --check
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
+   cargo clippy --workspace --all-targets --all-features -- -D warnings
+   cargo clippy --workspace --lib -- -D warnings
+   cargo test --workspace --all-features
    cargo doc --workspace --no-deps
    ```
 
    For the web app: `cd web && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build`.
-   For API or UI changes, also run `npm run test:e2e`.
+   For API or UI changes, also run `npm run test:e2e` and
+   `scripts/validate-workflow.sh`.
 3. Add tests that exercise the real SQLite implementation. Do not mock the
    storage layer to make a test pass.
 4. Update the documentation and `CHANGELOG.md` when behaviour changes.
+5. Keep claims honest. Performance numbers must come from real runs and be
+   labelled (smoke run, single run, or comparison of independent runs).
+   Reliability results must say what was not simulated. Never present an
+   integrity check as proof of authenticity or correctness.
+6. Keep fault injection out of `orbit-api`: nothing it depends on may
+   enable `fault-injection` or `reliability` (CI checks this).
 
 ## Ground rules
 

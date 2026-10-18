@@ -52,7 +52,16 @@ inputs.
    configuration digest (`ORBIT-LAB-PERFORMANCE-CONFIG-V1` over workload,
    version, input size and seed), the environment (OS, architecture,
    available parallelism, build profile, ORBIT version, git commit,
-   executable digest) and its limitations.
+   executable digest, and the **process** that measured: `orbit-lab` for
+   the CLI, `orbit-api` when started through the API), the **overhead**
+   around the timed sections (workload preparation, and the untimed
+   per-iteration setup and checks), and its limitations.
+
+**Independent execution.** The CLI (`orbit-lab measure`) measures in a
+process of its own, with nothing else running in it; that is the path for
+real measurements. A measurement started through the API runs inside the
+API server, alongside its other requests; such results say so, and
+comparing results from different processes produces a warning.
 
 ### Evidence levels
 
@@ -85,8 +94,19 @@ error below 1.2e-7. Both are tested against independent references:
 - Python's `statistics.NormalDist`;
 - `statistics.mean`, `median`, `stdev` and
   `quantiles(method="inclusive")` for the descriptive statistics;
-- SciPy's documented Mann–Whitney example (U = 17, p = 0.1113), recomputed
-  with the Python standard library.
+- SciPy's documented Mann–Whitney example (U = 17; exact p = 14/126 =
+  0.1111; asymptotic p = 0.1113), and exact p-values checked by brute-force
+  enumeration of every rank assignment in Python.
+
+**Mann–Whitney p-values** are **exact** when there are no ties and at most
+50 values in total: U's null distribution is the Gaussian binomial
+coefficient `[n1+n2 choose n1]_q`, computed by recurrence. Otherwise the
+normal approximation with tie and continuity corrections is used. The
+report names the method (`mann_whitney_u_exact` or
+`mann_whitney_u_normal_approximation`). Exactness matters for small
+samples: with 5 values per side the smallest possible two-sided p is
+2/252 = 0.0079, and with 3 per side it is 0.1, so no 3-versus-3
+comparison can be significant.
 
 ## Comparison (`compare.rs`)
 
@@ -121,6 +141,23 @@ Only `regression` and `improvement` are statistically supported findings,
 and only about the two runs compared. CI never fails on a verdict: it only
 checks that the workloads run.
 
+### Comparing sets of independent runs
+
+A single run's intervals describe variation **within** that run. Whether
+two configurations or builds really differ needs several independent runs
+of each (ideally separate processes), compared on their per-run medians:
+`compare-runs` (CLI), `POST /lab/performance/compare-runs` (API),
+`Lab::compare_performance_runs`.
+
+- Every run must be compatible with the first baseline run; a single
+  incompatible run stops the comparison and is named.
+- 2–20 runs per side. The test on the run medians needs at least 3 per
+  side, and the report gives `min_achievable_p`: the smallest p-value the
+  run counts allow. When it is not below α, the explanation says that no
+  significant result was possible.
+- The verdicts are the same as for single runs, applied to the median of
+  the run medians. The between-run standard deviation is reported.
+
 **Baselines.** Pass one explicitly, or omit it. Without one, the newest
 completed performance experiment created before the first candidate is
 used, provided it has the same configuration digest and a compatible
@@ -152,6 +189,12 @@ cargo run --release -p orbit-lab -- --lab data/lab measure historical-reconstruc
 
 ```bash
 cargo run --release -p orbit-lab -- --lab data/lab compare --threshold 10 --alpha 0.01 CANDIDATE_ID
+```
+
+Independent runs are separate invocations of `measure`; then:
+
+```bash
+cargo run --release -p orbit-lab -- --lab data/lab compare-runs --baseline ID1,ID2,ID3,ID4,ID5 --candidate ID6,ID7,ID8,ID9,ID10
 ```
 
 Through the API, `POST /api/v1/lab/experiments` with `{"kind":
@@ -206,6 +249,48 @@ Reproducing the integrity-verification experiment:
 reproduced within_threshold rel=-0.0012 p=0.2428 01a14fa9-f81d-7404-80a1-e676e7acd13b
 ```
 
+## Recorded comparison of independent runs (5 + 5)
+
+Real outputs, recorded on 2026-10-18 on the same machine (macOS, aarch64,
+8 available CPUs), release build at commit `6254309` (version 0.2.0),
+measured by the CLI (`process: orbit-lab`). Ten separate `orbit-lab
+measure historical-reconstruction --input-size 2000 --warmup 3
+--iterations 30` processes ran one after another: five as the baseline,
+five as the candidate. Same code on both sides, so this measures
+run-to-run variation, not an improvement.
+
+| | Run medians (ms) | Median of medians | Between-run SD |
+|---|---|---|---|
+| Baseline | 1.2587, 1.2107, 1.2082, 1.2502, 1.2248 | 1.2248 ms | 22.9 µs |
+| Candidate | 1.2236, 1.2062, 1.2133, 1.2228, 1.2076 | 1.2133 ms | 8.2 µs |
+
+```text
+verdict: within_threshold
+relative_change: -0.0094 (−0.94 %)
+test: mann_whitney_u_exact, p = 0.2222 (min_achievable_p = 0.0079)
+explanation: the median of the run medians changed by -0.94 %, less than the 10 % threshold
+```
+
+Five snapshot-reconstruction runs offered as the candidate against the same
+baseline:
+
+```text
+verdict: incompatible
+explanation: not compared: candidate run 1: workload: historical-reconstruction vs snapshot-reconstruction; … candidate run 5: …
+```
+
+The first baseline run's overhead: 97.9 ms preparing the workload (seeding
+2,000 events), 44.4 ms for the whole loop of 33 iterations, of which
+8.6 µs was untimed setup and checks.
+
+**Between-session variation.** The single run of the same workload
+recorded earlier the same day (table above, commit `3339bfe`) had a median
+of 2.120 ms; these runs, a few hours later, had about 1.22 ms. The code
+of this workload did not change in between. The machine's state did
+(other load, thermal and power conditions), which is why one run is not a
+benchmark, and why only comparisons of runs taken together under the same
+conditions are meaningful.
+
 ## Limitations
 
 - **One process, one machine.** File-system caches, CPU frequency scaling
@@ -213,11 +298,13 @@ reproduced within_threshold rel=-0.0012 p=0.2428 01a14fa9-f81d-7404-80a1-e676e7a
   API run inside the API server process, alongside its other requests.
 - **Wall-clock time.** Durations include any time the thread was
   descheduled.
-- **No between-run statistics.** Each run's intervals are within-run. Many
-  runs per configuration would be needed for between-run variability; the
-  lab records them but does not aggregate them.
-- **Mann–Whitney normal approximation.** Exact p-values are not computed.
-  The test is only run with at least 10 samples per side.
+- **Between-run comparisons need several runs.** One run's intervals are
+  within-run. `compare-runs` uses independent runs, but how many runs, how
+  far apart in time, and under what load is up to whoever measures; the
+  lab does not schedule or isolate them.
+- **Approximate p-values for large or tied samples.** Above 50 values in
+  total, or with ties, the normal approximation is used. The sample-level
+  test runs only with at least 10 samples per side.
 - **No cancellation.** A running measurement cannot be cancelled. If its
   process stops, it is marked `failed`/`interrupted` when the lab is next
   opened.

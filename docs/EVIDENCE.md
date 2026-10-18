@@ -18,6 +18,7 @@ UTF-8.
 | `manifest` | `experiment_id`, `kind`, `exporter` (ORBIT version, git commit, executable digest), `document_digest`, and `entries`: `name`, `media_type`, `size`, `sha256` for every entry, sorted by name |
 | `document` | `experiment`: the full record (spec and spec digest, implementation descriptors, build, lifecycle timestamps, pinned input, result and result digest, failure, artifact references). Also `verifications` (its history in the exporting lab), `history`, `provenance` and `limitations` |
 | `entries` | base64 (RFC 4648, padded): one `artifacts/<role>` entry per artifact, plus `history/events.json` when the history is included |
+| `signatures` | optional, at most 8: `{key_id, algorithm: "ed25519", public_key, signature}` (see [Signatures and trust](#signatures-and-trust)); not covered by the bundle digest, which they sign |
 
 - **Bundle digest:** the `ORBIT-EVIDENCE-BUNDLE-V1` tagged SHA-256 of the
   canonical manifest. The manifest holds the document digest
@@ -72,10 +73,12 @@ The report also states:
 - **Integrity:** every digest matches its content, and any change to the
   content changes the bundle digest. That makes it tamper-evident
   **relative to a bundle digest you obtained from a trusted channel**.
-- **Not authenticity:** bundles are not signed. Anyone can build a
-  consistent bundle under a new digest. A test (`a_consistent_forgery_…`)
+- **Not authenticity, unless signed by a key you trust.** Anyone can build
+  a consistent bundle under a new digest. A test (`a_consistent_forgery_…`)
   forges a result, recomputes every digest, and gets a *valid* bundle;
-  reproduction then reports `differs`.
+  reproduction then reports `differs`. Authenticity is reported separately,
+  as `unsigned`, `signed_untrusted` or `trusted`
+  ([below](#signatures-and-trust)).
 - **Not scientific correctness:** validation shows that the evidence is
   consistent, not that the experiment was right.
 - A matching executable digest identifies the same binary, not
@@ -85,6 +88,56 @@ A property test flips single bytes of the valid fixture (512 cases per
 run). Every mutated bundle is either invalid, or valid with a *different*
 bundle digest. The second case comes from editing a manifest field that
 only the bundle digest itself covers, such as the exporter's commit.
+
+## Signatures and trust
+
+Integrity says the bundle is consistent; authenticity says **who** vouches
+for it. ORBIT keeps the two apart.
+
+- **Signing.** `orbit-lab keygen --key-id ID --out key.json --public-out
+  trusted-keys.json` creates an Ed25519 key, with randomness from the
+  operating system. The key file is written with owner-only permissions on
+  Unix, an existing file is never overwritten, and the secret is never
+  printed. `orbit-lab sign bundle.json --key key.json --out signed.json`
+  signs a **valid** bundle: the signature covers
+  `ORBIT-EVIDENCE-SIGNATURE-V1 ‖ bundle digest`. Signing does not change the
+  bundle digest, and signing again with the same key id replaces that
+  signature. Implementation: `ed25519-dalek` (strict verification), in
+  `crates/orbit-lab/src/signing.rs`; no custom cryptography.
+- **Verification** is part of validation. A malformed signature
+  (`malformed_signature`: bad key id, algorithm, key or length, or a key id
+  signing twice) or one that does not verify for this bundle's digest
+  (`invalid_signature`) makes the bundle **invalid**. Altering any content
+  after signing changes the bundle digest and so invalidates the signature,
+  even if every content digest is recomputed.
+- **Trust is explicit.** A valid signature counts only if its key id *and*
+  public key are listed in a trusted-keys file that the verifier configured:
+  `--trusted-keys FILE` for the CLI, `ORBIT_TRUSTED_KEYS` for the API.
+  Otherwise the result is `signed_untrusted`, including for a key that
+  reuses a trusted key's id. No key is trusted automatically, not even the
+  one embedded in the signature. Without signatures the result is
+  `unsigned`.
+- **What `trusted` means:** the holder of that private key signed this exact
+  bundle. It does not make the experiment correct, and it is only as good
+  as your key management.
+- **Key management is yours.** Keys are files: keep them out of
+  repositories and bundles (ORBIT never embeds them), give the trusted-keys
+  file only to verifiers who should trust those signers, and rotate by
+  issuing a new key id and replacing the trusted-keys file. There is no key
+  revocation list or expiry.
+
+The report's `authenticity` field and the Observatory's Evidence page
+show the status, the key ids, whether a trust store was configured, and
+what the status establishes. Imports record the authenticity seen at
+import time and keep the signatures.
+
+Tests: `crates/orbit-lab/src/signing.rs` unit tests (key ids, hex, flipped
+signatures, impostor keys, trust-store errors, key-file permissions and
+no-overwrite); `tests/bundles.rs` (`signatures::…`: signed, trusted,
+untrusted, impostor, altered after signing, malformed, unknown fields,
+import and re-validation); `tests/cli.rs` (keygen, sign, validate with and
+without a trust store); `orbit-api` `tests/evidence.rs` (trust only by
+configuration).
 
 ## Import
 
@@ -175,8 +228,10 @@ cargo test -p orbit-lab --test bundles -- --ignored regenerate_fixtures
 
 ## Limits and limitations
 
-- No signatures: authenticity depends on obtaining the bundle digest from
-  a trusted source.
+- Signatures are optional. An unsigned bundle's origin is established only
+  by obtaining its bundle digest from a trusted source. There is no key
+  revocation, expiry or certificate chain: a trusted-keys file is a flat
+  list.
 - The history is included only while the exporting store still holds the
   pinned events, and only up to about 16 MiB of event JSON.
 - Bundles are uncompressed, so there is no decompression step to bound.

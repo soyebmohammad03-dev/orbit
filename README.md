@@ -1,500 +1,323 @@
-# ORBIT
+<p align="center">
+  <img src="docs/assets/brand/orbit-banner.svg" alt="ORBIT: event history you can replay, compare, stress and prove" width="100%">
+</p>
 
-**ORBIT is a persistent event store being built toward a time-travel
-debugging platform.** It records what happened to a system as ordered,
-append-only, integrity-checked event streams. From those streams it
-reconstructs, compares and deterministically replays historical state.
+<p align="center">
+  <a href="https://github.com/soyebmohammad03-dev/orbit/actions/workflows/ci.yml"><img src="https://github.com/soyebmohammad03-dev/orbit/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
+  <a href="https://github.com/soyebmohammad03-dev/orbit/releases"><img src="https://img.shields.io/github/v/release/soyebmohammad03-dev/orbit?sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+  <a href=".github/workflows/ci.yml"><img src="https://img.shields.io/badge/tested%20on-Linux%20%7C%20macOS-informational" alt="Tested on Linux and macOS"></a>
+</p>
 
-> **Status: all five planned phases are complete. The current release is
-> `v0.1.0`, a pre-1.0 release** (see [Release status](#release-status)).
-> - Phase 1: core event engine and persistence.
-> - Phase 2: historical state reconstruction, snapshots and state diffs.
-> - Phase 3: crash recovery, concurrency guarantees, integrity diagnostics and
->   deterministic replay.
-> - Phase 4: the **Observatory**, a local HTTP API and web interface over the
->   real engine.
-> - Phase 5: verification, hardening and release.
->
-> Since `v0.1.0` (unreleased, on `main`): **Sprint 7** adds `orbit-lab`, an
-> experiment registry with differential replay of two projection
-> implementations. **Sprint 8** adds the complete divergence timeline,
-> evidence-based diagnosis, identity completeness and stricter reproduction.
-> See [docs/LAB.md](docs/LAB.md).
->
-> The HTTP API is for **trusted local use only**: it has no authentication.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#testing-and-evidence">Testing</a> ·
+  <a href="#security-model-and-limitations">Security model</a>
+</p>
 
-![ORBIT Observatory: Time Travel](docs/screenshots/time-travel.png)
+**ORBIT is an append-only event store with a laboratory built on top of it.**
+It records what happened to a system as ordered, hash-chained event streams
+in SQLite. From those streams it reconstructs any historical state, replays
+two implementations side by side to find exactly where they diverge, stresses
+its own storage with real process crashes, measures its operations with
+honest statistics, and packages the results as portable, verifiable evidence.
 
-## Problem
+It is written in Rust, with an Axum HTTP API and a Next.js interface, the
+**Observatory**. Everything runs locally: no services, accounts or paid APIs.
+The current release is **v0.2.0** ([release status](#project-status)).
+
+<p align="center">
+  <img src="docs/assets/screenshots/differential-replay.png" alt="The Observatory's Experiments page: a differential replay of two counter implementations that diverge at boundary 2, with identities, reproducibility, and evidence apart from what is not established" width="900">
+</p>
+
+## Contents
+
+- [Why ORBIT](#why-orbit)
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Testing and evidence](#testing-and-evidence)
+- [Security model and limitations](#security-model-and-limitations)
+- [Documentation](#documentation)
+- [Repository layout](#repository-layout)
+- [Project status](#project-status)
+- [Contributing and license](#contributing-and-license)
+
+## Why ORBIT
 
 When a system misbehaves, its current state rarely explains how it got there.
-Logs are lossy, unordered across components, and easy to change after the
-fact. An event store keeps every state change as an immutable, ordered fact.
-With that foundation you can answer "what did this look like at step N, and
-what changed?" Answering that reliably requires a trustworthy foundation: dense
-ordering that never depends on wall clocks, atomic durable appends, and a way
-to detect stored history that has been damaged or altered. Phase 1 builds that
-foundation. Phase 2 answers the question itself: it reconstructs any historical
-state, diffs two of them, and names the events responsible for each change.
+An event store keeps every change as an immutable, ordered fact, but that is
+only useful if the history can be trusted and interrogated:
 
-## Implemented in Phase 1
+- **Was it altered?** Every event is chained to the previous one with
+  SHA-256, so damage and edits are detected and located.
+- **What did it look like at step N, and what changed?** Any historical
+  state can be rebuilt (from a validated snapshot when one exists), diffed,
+  and attributed to the events that caused each change.
+- **Does a new implementation agree with the old one?** Differential replay
+  folds both over the same verified history and reports the first boundary
+  where their states differ, every divergence interval, and what the evidence
+  does *not* establish.
+- **Does it survive failure?** Reliability scenarios abort, kill and pause
+  real processes at named fault points and check what must still hold.
+- **Did it get slower?** Performance experiments record every sample and
+  refuse to compare incompatible runs or to call noise a regression.
+- **Can someone else check this?** Evidence bundles carry an experiment and
+  its inputs under an integrity manifest, optionally signed, and can be
+  reproduced elsewhere.
 
-- **Streams.** Explicit creation with immutable metadata, existence checks,
-  and head inspection.
-- **Append-only events.** Atomic appends assign dense sequence numbers
-  (1, 2, 3, …). An empty stream has head 0.
-- **Optimistic concurrency.** `ExpectedSequence::Exact(n)` rejects stale
-  writers with a typed `SequenceConflict`.
-- **Reads.** A single event by sequence, a whole stream, or pages of events
-  after a sequence, always in sequence order.
-- **Durable SQLite persistence.** WAL mode, configurable durability (`Full`
-  by default, including `F_FULLFSYNC` on macOS), and versioned migrations.
-  Constraints and triggers enforce the invariants in the database itself.
-- **Integrity verification.** Payloads are stored as canonical JSON. Each event
-  carries a SHA-256 digest chained to the previous event's. `verify_stream`
-  reports digest mismatches, chain breaks, gaps, malformed rows and head
-  mismatches, each with its sequence number.
-- **Validation and typed errors.** Every input is validated at the boundary.
-  No panics on bad input or damaged files.
-- **Configuration** in code or through `ORBIT_*` environment variables.
+## What it does
 
-## Implemented in Phase 2
+| | |
+|---|---|
+| **Event store** (`orbit-core`) | Append-only streams with dense sequences, optimistic concurrency and idempotent retries; a SHA-256 digest chain; integrity diagnostics that name the affected events, and trusted checkpoints. SQLite (WAL), schema v3, upgraded in place from every earlier version. |
+| **Time travel** | Reconstruct the state at any sequence with any projection, from the newest *valid* snapshot or by full replay; structural diffs; per-event explanations. Snapshots are bound to the event digest they summarise and validated before use. |
+| **Replay** | Recorded replay runs with a per-event state-digest trace, re-executed and classified (exact match, reconverged, diverged, failed, unavailable). |
+| **Differential replay** (`orbit-lab`) | Two implementations, one verified history, compared canonically after every event: first divergence with its structural diff, every divergence interval and convergence, a determinism re-run, implementation identity and build fingerprints. |
+| **Reliability laboratory** | Four scenarios (interrupted appends, interrupted snapshot writes, interrupted experiments and artifact writes, registry concurrency) with real child processes that abort, are killed with `SIGKILL` or paused. Each case reports expected versus observed invariants. Launchable from the Observatory through a separately built runner. |
+| **Performance laboratory** | Seven workloads with warm-up and measured iterations; every sample recorded; distribution-free median intervals; exact Mann–Whitney tests for small samples; comparisons of single runs and of sets of independent runs, with explicit compatibility rules. |
+| **Evidence bundles** | One canonical JSON file per experiment: manifest, record, artifacts and input events. Strict, bounded validation; import kept apart from local results; exact reproduction from the bundle alone; optional Ed25519 signatures with an explicit trust store. |
+| **Observatory** | Every capability above in a local web interface, backed only by the real API. |
 
-- **Projections.** A small `Projection` trait: an initial state and a fallible
-  `apply`. Errors are typed as unsupported, invalid payload, or rejected
-  transition. Two example projections are included: `Counter`, and a nested
-  `Inventory`.
-- **Historical reconstruction.** State at `Target::Latest` or any
-  `Target::At(n)`, folded in bounded pages, in sequence order. It fails
-  explicitly on a projection error. There are never partial results.
-- **Snapshots.** Persisted, digest-protected and bound to the digest of the
-  event they were built on. Saving is idempotent. Each snapshot is validated
-  before use: integrity, history binding, projection key, and decodability.
-- **Snapshot-assisted reconstruction.** Uses the newest valid compatible
-  snapshot at or before the target. The policy is `Prefer` (skip and report
-  invalid snapshots), `Strict`, `Exact(id)` or `Ignore`. Results can be
-  checked against full replay.
-- **State diffs.** A structural JSON diff with RFC 6901 paths: added, removed
-  and modified, in deterministic order. It runs between any two historical
-  positions.
-- **Provenance.** Serializable reconstruction reports: start point, events
-  applied, rejected snapshots, and timing. `explain` attributes every change
-  to the event that caused it.
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/screenshots/time-travel.png" alt="Time Travel: a historical state next to the current one, with the structural diff and the events that changed it"></td>
+    <td width="50%"><img src="docs/assets/screenshots/reliability.png" alt="A reliability experiment launched from the Observatory: six cases, simulated errors and real process aborts, each with its invariants"></td>
+  </tr>
+  <tr>
+    <td><b>Time travel</b>: historical and current state, the diff between them, and the events responsible.</td>
+    <td><b>Reliability</b>: a scenario run by the separate runner; each case says whether a real process failed.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/screenshots/performance.png" alt="Performance: two measurements compared; the change is below the threshold, and both are labelled smoke runs because the server is a debug build"></td>
+    <td><img src="docs/assets/screenshots/evidence.png" alt="Evidence: an imported bundle with its entries, verified input history, and authenticity reported separately from integrity"></td>
+  </tr>
+  <tr>
+    <td><b>Performance</b>: verdicts with their test and caveats; debug builds are labelled smoke runs.</td>
+    <td><b>Evidence</b>: integrity, history and authenticity (unsigned here) reported separately.</td>
+  </tr>
+</table>
 
-## Implemented in Phase 3
-
-- **Recovery guarantees, tested by fault injection.** Every write is one
-  transaction. Deterministic fault points at each transaction boundary (the
-  `fault-injection` cargo feature, off by default) show that no failed
-  operation leaves committed state. Real child-process crashes (`abort()` at
-  chosen points, and `SIGKILL` during appends) show that reopening recovers
-  every committed event and nothing else. Power loss is *not* simulated.
-- **Concurrency invariants under stress.** Multi-connection and multi-process
-  tests run blind writers, optimistic writers with retry, readers and
-  snapshotters at once. They check that streams stay dense, that every
-  acknowledged append is stored exactly once, that conflicts are reported
-  correctly, and that snapshots are consistent.
-- **Integrity diagnostics.**
-  - `verify_store` runs SQLite's integrity check and covers foreign keys,
-    missing protective triggers, every stream, snapshot and replay run.
-  - Issues are categorised (modified event, broken chain, invalid genesis,
-    sequence continuity, head inconsistency, …) and name the affected event ids.
-  - **Trusted checkpoints** detect even a history rewritten with recomputed
-    unkeyed digests.
-  - `StoreError::class()` separates retryable failures from integrity violations.
-- **Deterministic replay.** `ReplayLab` records self-contained replay runs
-  (schema v3) with a per-event state-digest trace, re-executes them with the
-  current projection, and persists every execution.
-- **Divergence detection.** Outcomes are classified as exact match,
-  reconverged, diverged, projection failed, unavailable (for example a
-  projection version mismatch, which is never substituted), invalid input, or
-  integrity failure. ORBIT reports the first event after which the state
-  diverged, and the final-state diff.
-- **Experiments.** `ReplayLab::experiment` produces one structured report:
-  integrity, snapshot-assisted versus full replay, the replay outcome, state
-  digests and timings.
-
-## Implemented in Phase 4: the Observatory
-
-- **`orbit-api`.** An Axum server exposing `/api/v1`: health and
-  capabilities, streams and paged events, appends with optimistic concurrency,
-  reconstruction at any sequence, structural diffs, per-event explanations,
-  snapshots with live validation, checkpoints, stream and store verification,
-  replay runs, executions and experiments, and Criterion results.
-  - Engine calls run in `spawn_blocking`, and errors use one structured
-    envelope with proper status codes.
-  - The OpenAPI 3.1 document is generated from the handlers.
-  - It binds to localhost, with narrow CORS and bounded inputs.
-  - See [docs/API.md](docs/API.md).
-- **Web Observatory (`web/`).** Next.js App Router, strict TypeScript and
-  Tailwind, in a dark-first console design. It has eight working pages:
-  Overview, Streams, Events, Time Travel, Snapshots, Replay Lab, Integrity and
-  Benchmarks. All data comes from the real API, with loading, empty, error and
-  retry states. See [docs/OBSERVATORY.md](docs/OBSERVATORY.md).
-- **Core additions.**
-  - A general-purpose `merge-patch@v1` projection (RFC 7386), so any JSON
-    stream can be reconstructed and diffed.
-  - Stream summaries, store statistics and a recent-activity query.
-
-## Added after v0.1.0: the experiment lab (Sprint 7)
-
-- **`crates/orbit-lab`.** A separate crate, built only on `orbit-core`'s
-  public API. It never writes to an event store. It provides:
-  - **an experiment registry** in its own SQLite file (`lab.db`), with
-    migrations, an enforced lifecycle (`created → running → completed |
-    failed`), immutable records, canonical spec digests, and detection of
-    interrupted runs;
-  - **content-addressed artifacts**, verified on every read;
-  - **implementation identities**, so two implementations declaring the same
-    projection name and version are distinguishable;
-  - **differential replay**: both implementations fold the same verified,
-    ordered events in lockstep. States are compared canonically at every
-    boundary, with the first divergence, its structural diff, divergent
-    segments, implementation failures, a determinism double-check, and
-    reproduction from the stored spec.
-- **Interfaces.**
-  - an `orbit-lab` CLI;
-  - `/api/v1/lab/*` endpoints ([docs/API.md](docs/API.md#lab-endpoints));
-  - an **Experiments** page in the Observatory.
-- **Sprint 8: failure diagnosis.**
-  - Every divergence interval and convergence, with entry and exit diffs,
-    event context and change summaries.
-  - Evidence kept apart from what it does not establish.
-  - A per-boundary trace API.
-  - Identity completeness (declared, configuration, Git commit, executable
-    digest), with registry migration v2.
-  - Reproduction that classifies configuration mismatches,
-    non-reproducible results, changed or unavailable histories and
-    implementations.
-  - Sprint 7 records remain readable and reproducible (tested from a real
-    fixture).
-- **Sprint 9: reliability laboratory** ([docs/RELIABILITY.md](docs/RELIABILITY.md)).
-  - Four scenarios: interrupted appends, interrupted snapshot writes,
-    interrupted lab experiments and artifact writes, and registry
-    concurrency.
-  - Failures are injected at named fault points, by real process aborts,
-    `SIGKILL`, paused live processes, and up to 8 concurrent OS processes.
-  - Results are stored as `reliability` experiments, with expected versus
-    observed invariants and verdicts (preserved, violated, inconclusive).
-    Infrastructure failures are kept separate.
-  - Fault injection stays out of the API, enforced by tests and CI.
-  - Registry migration v3; locked temporary artifact files, cleaned up only
-    when their writer is gone.
-  - Process crashes only: power loss is **not** simulated.
-- **Phase 9: one integrated platform.**
-  - **One experiment model** for differential replay, reliability and
-    performance. Registry v4; experiments whose creator died before
-    starting them are marked `abandoned` (creation locks). One set of
-    reproduction statuses, including `artifact_missing`, `inconclusive`
-    and `unsupported`.
-  - **Statistical performance lab** ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
-    - seven workloads, with warm-up and measured iterations and seeds;
-    - every sample, plus median and mean intervals, percentiles gated by
-      sample count, and the environment;
-    - comparisons that refuse incompatible configurations and separate
-      suspected changes from Mann–Whitney-supported ones;
-    - linked re-measurement as reproduction.
-  - **Portable evidence bundles** ([docs/EVIDENCE.md](docs/EVIDENCE.md)):
-    - versioned canonical JSON with an integrity manifest and the input
-      events;
-    - strict, bounded validation;
-    - import kept apart from local experiments;
-    - exact reproduction of a differential replay from the bundle alone.
-  - **API and Observatory:** background measurements (one at a time),
-    comparison, bundle export, validation, import and reproduction; new
-    **Performance** and **Evidence** pages; grouped navigation.
-- Design and limitations are in [docs/LAB.md](docs/LAB.md) and
-  [ADR 0009](docs/adr/0009-orbit-lab-crate-and-registry.md).
-
-## Tests
-
-| Suite | Count | Runs against |
-|-------|-------|--------------|
-| `orbit-core` unit + integration + doc | 44 + 126 + 4 | real SQLite files (126 includes 9 property tests and 2 child-process entry points) |
-| `orbit-api` unit + HTTP contract + hardening + lab + evidence/performance + TCP | 7 + 16 + 6 + 10 + 6 + 1 | the real router and engine on temporary databases |
-| `orbit-lab` unit + differential + timeline + reproduction + registry + identity + properties + CLI + reliability + abandonment + performance + bundles + doc | 31 + 16 + 10 + 7 + 11 + 7 + 3 + 4 + 9 + 5 + 6 + 11 + 1 | real event stores and registries in temporary directories; timelines checked against an independent reference; real child processes; statistics against independently computed answers; a real Sprint 7 registry fixture and committed bundle fixtures |
-| Web unit and component (Vitest) | 41 | the API client, components, the Overview, Experiments, reliability, performance and evidence views, with mocked responses |
-| End-to-end (Playwright) | 5 | a real `orbit-api` + production web build + empty temporary SQLite files (event store and lab registry) |
-
-Totals at the end of Phase 9: 341 Rust tests (one more, the bundle
-fixture generator, is `#[ignore]`d), 41 web unit tests and 5 end-to-end
-tests.
-
-Criterion suites cover the event store, reconstruction, and Phase 3's
-concurrency, verification, replay and failure paths.
+The screenshots are of the real application, after
+[`scripts/validate-workflow.sh`](scripts/validate-workflow.sh) created its
+records through the API, captured with
+[`web/scripts/screenshots.mjs`](web/scripts/screenshots.mjs). More are in
+[docs/assets/screenshots](docs/assets/screenshots), including a
+[phone-width layout](docs/assets/screenshots/mobile-experiments.png).
 
 ## Architecture
 
-```text
-web/ (Next.js) ──HTTP /api/v1──▶ crates/orbit-api (Axum) ──spawn_blocking──▶ crates/orbit-core ──▶ SQLite
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Architecture: the Observatory and the CLIs use orbit-api and orbit-lab; orbit-lab reads event stores through orbit-core's public API; only the separately built orbit-reliability runner contains fault hooks, and orbit-api starts it only when an operator configures it" width="900">
+</p>
 
-crates/orbit-lab (Sprint 7; uses orbit-core's public API, reads event stores only)
-├── registry     lab.db: experiments, lifecycle, artifacts, verifications (SQLite)
-├── artifacts    content-addressed files under artifacts/sha256/
-├── identity     ImplementationDescriptor, fingerprints, BuildInfo
-├── catalog      Implementation / Stepper, the Projection adapter, built-in catalog
-├── differential lockstep replay, canonical comparison, first divergence
-└── lab          Lab: create, run, verify, reproduce; interrupted-run recovery
+- **`orbit-core`** owns the event store. Only its `store` module knows about
+  SQLite; projections never touch storage.
+- **`orbit-lab`** holds experiments in its own registry (`lab.db`), separate
+  from every event store. It only *reads* event stores, through `orbit-core`'s
+  public API. One lifecycle (`created → running → completed | failed`) covers
+  every kind, enforced by the database. OS locks detect interrupted and
+  abandoned experiments without clocks.
+- **`orbit-api`** exposes both over `/api/v1` (OpenAPI 3.1 at
+  `/api/v1/openapi.json`). It contains **no fault-injection code**: CI checks
+  its feature graph and searches its binary.
+- **`orbit-reliability`** is a separately built tool and the only program
+  with fault hooks. The API can start it, with fixed arguments, only when
+  `ORBIT_RELIABILITY_RUNNER` is configured.
 
-crates/orbit-api
-├── routes       thin handlers: validate → engine call → DTO/report
-├── engines      DynEngine: runtime projection selection over Reconstructor/ReplayLab
-├── dto, error   request/response types, structured error envelope
-└── openapi      generated OpenAPI 3.1 document
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the
+[architecture decision records](docs/adr).
 
-crates/orbit-core
-├── domain       validated ids, Stream, AppendRequest, StoredEvent, canonical JSON
-├── store        EventStore: events, snapshots, schema/migrations (SQLite)
-├── integrity    event digest construction, chain verification, IntegrityReport
-├── projection   Projection trait, ProjectionError, example projections
-├── reconstruct  Reconstructor: historical state, snapshot use, diff, explain
-├── snapshot     snapshot types, snapshot digest, validation outcomes
-├── diff         structural JSON diff
-├── replay       ReplayLab: replay runs, executions, divergence, experiments
-├── fault        fault points (hooks with the `fault-injection` feature)
-├── config       StoreConfig, Durability, Limits, env loading
-└── error        StoreError, ErrorClass, ValidationError
-```
-
-Only `store` knows about SQLite. Projection logic never touches storage, and
-reconstruction reaches the database only through `EventStore` methods. For component diagrams and the append data flow, see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## Technology
-
-Rust (stable, edition 2024) · SQLite (bundled) through `rusqlite` · `serde` /
-`serde_json` · `sha2` · `uuid` (v7) · `chrono` · `thiserror` · `tracing`.
-The API uses Axum 0.8, Tokio, tower-http and utoipa. The web app uses Next.js 16
-(App Router), React 19, TypeScript (strict) and Tailwind CSS 4. Tests use
-`proptest`, `tempfile`, Vitest, Testing Library and Playwright. Benchmarks use
-`criterion`. ORBIT needs no services, hosted databases or paid APIs. Why `rusqlite` rather than `sqlx` is
-explained in [ADR 0001](docs/adr/0001-sqlite-via-rusqlite.md).
-
-## Getting started
+## Quick start
 
 Prerequisites: stable Rust (tested with 1.99.1), a C compiler (on macOS,
-`xcode-select --install`), and Node.js ≥ 20.9 for the web interface (tested
-with 24).
+`xcode-select --install`), and Node.js 20.9 or later for the web interface
+(tested with 24).
 
 ```bash
-git clone https://github.com/soyebmohammad03-dev/orbit.git && cd orbit
-cargo build
-cargo test
+git clone https://github.com/soyebmohammad03-dev/orbit.git
 ```
 
-### Run the Observatory
-
 ```bash
-cargo run -p orbit-api                 # API on http://127.0.0.1:7878 (database: data/orbit.db)
-cd web && npm ci && npm run dev        # UI on http://localhost:3000, in a second terminal
-scripts/seed-demo.sh                   # optional demonstration data, through the API
+cd orbit && cargo build && cargo test
 ```
 
-The API's contract is served at `http://127.0.0.1:7878/api/v1/openapi.json`.
-Configuration is described in [docs/API.md](docs/API.md#running).
-
-### Library examples
+Run the Observatory (two terminals):
 
 ```bash
-cargo run -p orbit-core --example quickstart
+cargo run -p orbit-api
+```
+
+```bash
+cd web && npm ci && npm run dev
+```
+
+Open <http://localhost:3000>. To fill it with demonstration data through the
+API:
+
+```bash
+scripts/seed-demo.sh
+```
+
+To launch reliability scenarios from the Observatory, build the runner and
+point the API at it (it is disabled otherwise):
+
+```bash
+cargo build -p orbit-lab --features reliability --bin orbit-reliability
+```
+
+```bash
+ORBIT_RELIABILITY_RUNNER="$PWD/target/debug/orbit-reliability" cargo run -p orbit-api
+```
+
+**Where data lives.** The event store is `data/orbit.db` and the lab is
+`data/lab/` (registry, artifacts, locks); both are git-ignored. Every
+setting is an `ORBIT_*` environment variable, documented in
+[docs/API.md](docs/API.md#running): addresses, CORS origins, allowed hosts,
+limits, timeouts, the lab directory, the reliability runner and the trusted
+signing keys.
+
+**Without the web interface**, the CLIs do everything:
+
+```bash
 cargo run -p orbit-core --example time_travel
-cargo run -p orbit-core --example crash_lab
 ```
 
-### Minimal example
+```bash
+cargo run --release -p orbit-lab -- measure historical-reconstruction --iterations 30
+```
+
+```bash
+cargo run -p orbit-lab -- export <experiment id> --out bundle.json
+```
+
+```bash
+cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run registry-concurrency
+```
+
+A minimal library example:
 
 ```rust,no_run
-use orbit_core::{AppendRequest, EventStore, EventType, Metadata, Sequence, StoreConfig, StreamId};
+use orbit_core::{AppendRequest, EventStore, EventType, Metadata, StoreConfig, StreamId};
 use serde_json::json;
 
 fn main() -> Result<(), orbit_core::StoreError> {
     let store = EventStore::open(StoreConfig::new("orbit.db"))?;
-
-    let account = StreamId::new("account-42")?;
-    store.create_stream(&account, Metadata::new())?;
+    let stream = StreamId::new("account-42")?;
+    store.create_stream(&stream, Metadata::new())?;
 
     let opened = EventType::new("account.opened")?;
-    let event = store.append(
-        &account,
-        AppendRequest::new(opened, json!({"owner": "alice"})).expect_sequence(Sequence::ZERO),
-    )?;
-    assert_eq!(event.sequence, Sequence::FIRST);
-
-    for event in store.read_after(&account, Sequence::ZERO, 100)? {
-        println!("#{} {} {}", event.sequence, event.event_type, event.payload);
-    }
-
-    let report = store.verify_stream(&account)?;
-    assert!(report.is_valid());
+    let event = store.append(&stream, AppendRequest::new(opened, json!({"owner": "alice"})))?;
+    assert_eq!(event.sequence.get(), 1);
+    assert!(store.verify_stream(&stream)?.is_valid());
     Ok(())
 }
 ```
 
-### Time travel
+## Testing and evidence
 
-```rust,no_run
-use orbit_core::projection::examples::Counter;
-use orbit_core::{EventStore, ReconstructOptions, Reconstructor, Sequence, StreamId, Target};
+| Suite | Tests | What it exercises |
+|---|---|---|
+| `orbit-core` | 173 | Real SQLite files: persistence, constraints run as raw SQL, concurrency across threads and processes, child processes that `abort()` or are killed mid-append, fault points, tamper detection, migrations from real v1/v2 fixtures, and property tests that check reconstruction and replay against independent reference folds |
+| `orbit-lab` | 139 | Differential replay against an independent reference, registry lifecycle and recovery (including killed creators), reliability scenarios with real child processes, the launcher's deadline and process-group kill, statistics against independently computed answers, bundle validation, tampering, signatures and committed fixtures |
+| `orbit-api` | 53 | The real router: every endpoint's contract, limits, the Host and CORS guards, background runs, reliability launching, bundle routes, and a real TCP server |
+| Web unit and component | 46 | The typed API client, formatters and views, with mocked responses |
+| End-to-end (Playwright) | 6 | A real `orbit-api` (with the real reliability runner), a production web build and empty databases, in Chromium, including phone-width checks |
 
-fn time_travel(store: &EventStore, stream: &StreamId) -> Result<(), Box<dyn std::error::Error>> {
-    let counter = Reconstructor::new(store, Counter);
-    let options = ReconstructOptions::default(); // uses valid snapshots when present
+Every push runs, on Ubuntu and macOS:
+- formatting, `clippy -D warnings` (all features, and the production build
+  without them), all tests, docs, and benchmark compilation;
+- smoke runs of the examples and a performance workload;
+- the fault-isolation checks on `orbit-api`;
+- the web checks and production build;
+- the end-to-end suite;
+- a dependency audit (`cargo audit` against the RustSec database and
+  `npm audit` for production dependencies).
 
-    let then = counter.reconstruct(stream, Target::At(Sequence::new(10)?), options)?;
-    println!("value after event 10: {} ({:?})", then.state.value, then.report.start);
+[`scripts/validate-workflow.sh`](scripts/validate-workflow.sh) drives every
+subsystem through the public API and CLIs on a fresh data directory: 43
+checks, including a restart and checks that no process, work directory, temp
+file or lock file is left behind. It passed for this release.
 
-    counter.create_snapshot(stream, Target::Latest, options)?;
-    let check = counter.compare_with_full_replay(stream, Target::Latest, options.snapshots)?;
-    assert!(check.equivalent);
+**Measurements are not guarantees.** The numbers in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) are labelled as smoke runs,
+single-run measurements, or comparisons of independent runs, with machine
+and build. Reliability results show that the listed invariants held for the
+listed failures on the machines that ran them; they do not cover power loss,
+OS crashes or storage faults ([docs/RELIABILITY.md](docs/RELIABILITY.md)).
 
-    let diff = counter.diff(stream, Sequence::new(5)?, Sequence::new(10)?, options)?;
-    println!("{}", serde_json::to_string_pretty(&diff.changes)?);
-    Ok(())
-}
-```
+## Security model and limitations
 
-[docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md) and
-[docs/SNAPSHOTS.md](docs/SNAPSHOTS.md) cover the full semantics.
+- **Local use only.** The API has **no authentication**. It binds to
+  `127.0.0.1`, refuses non-loopback addresses unless explicitly allowed,
+  checks the `Host` header (DNS-rebinding defence), allows CORS only for
+  configured origins, and bounds bodies, pages, ranges and request time. Do
+  not expose it to a network.
+- **Fault injection never reaches the production API.** See
+  [Architecture](#architecture).
+- **Digests are unkeyed.** They detect damage and naive edits. Someone who
+  can rewrite the database can recompute them; checkpoints kept elsewhere
+  detect that up to the checkpoint.
+- **Bundles are tamper-evident, not self-authenticating.** Any change
+  changes the bundle digest, but anyone can build a consistent bundle.
+  Signatures count only for keys in a trust store you configure; unsigned
+  and untrusted bundles are labelled as such everywhere.
+- **Durability under power loss or OS crashes is not independently
+  tested.** It rests on SQLite and the device.
 
-## Tests, lints and benchmarks
+The full threat model and every known limitation:
+[SECURITY.md](SECURITY.md), [docs/RECOVERY.md](docs/RECOVERY.md) and the
+limitation sections of [LAB](docs/LAB.md#known-limitations),
+[RELIABILITY](docs/RELIABILITY.md), [PERFORMANCE](docs/PERFORMANCE.md#limitations)
+and [EVIDENCE](docs/EVIDENCE.md#limits-and-limitations).
 
-```bash
-cargo test --workspace                                 # all Rust tests (core + API + lab)
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo doc --workspace --no-deps
-(cd web && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build)
-(cd web && npx playwright install chromium && npm run test:e2e)   # end-to-end workflow
-cargo bench -p orbit-core --bench event_store          # ~1 minute
-cargo bench -p orbit-core --bench reconstruction        # ~1.5 minutes
-cargo bench -p orbit-core --bench crash_lab             # ~2 minutes
-```
+## Documentation
 
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) maps each test to what it covers. It
-also has the benchmark workloads and the recorded measurements, labelled with
-their hardware and conditions.
+| Topic | Document |
+|---|---|
+| Architecture, data flow, design decisions | [ARCHITECTURE](docs/ARCHITECTURE.md), [ADRs](docs/adr) |
+| Event model, storage format, recovery and integrity | [EVENT_MODEL](docs/EVENT_MODEL.md), [STORAGE_DESIGN](docs/STORAGE_DESIGN.md), [RECOVERY](docs/RECOVERY.md) |
+| Reconstruction, snapshots, replay | [RECONSTRUCTION](docs/RECONSTRUCTION.md), [SNAPSHOTS](docs/SNAPSHOTS.md), [REPLAY](docs/REPLAY.md) |
+| Experiments, differential replay, reproduction | [LAB](docs/LAB.md) |
+| Reliability scenarios and the runner | [RELIABILITY](docs/RELIABILITY.md) |
+| Performance method, statistics, recorded results | [PERFORMANCE](docs/PERFORMANCE.md) |
+| Evidence bundles, signatures, trust | [EVIDENCE](docs/EVIDENCE.md) |
+| HTTP API and configuration | [API](docs/API.md) |
+| The Observatory | [OBSERVATORY](docs/OBSERVATORY.md) |
+| Development, tests, CI, benchmarks | [DEVELOPMENT](docs/DEVELOPMENT.md) |
 
 ## Repository layout
 
 ```text
-.
-├── Cargo.toml                 workspace manifest (shared lints)
-├── crates/orbit-api/          Axum HTTP API (src/routes, tests/ contract + TCP tests)
-├── crates/orbit-lab/          experiment registry, differential replay, orbit-lab CLI (src/bin)
-├── web/                       Next.js Observatory (src/app pages, src/lib client, tests/unit, tests/e2e)
-├── scripts/seed-demo.sh       demonstration data through the API
-├── crates/orbit-core/
-│   ├── src/                   library source
-│   ├── tests/                 integration and property tests (real SQLite files)
-│   │   └── fixtures/          schema v1 and v2 database dumps for migration tests
-│   ├── benches/               event_store.rs, reconstruction.rs, crash_lab.rs (Criterion)
-│   └── examples/              quickstart.rs, time_travel.rs, crash_lab.rs
-├── docs/
-│   ├── ARCHITECTURE.md  EVENT_MODEL.md  STORAGE_DESIGN.md  DEVELOPMENT.md
-│   ├── RECONSTRUCTION.md  SNAPSHOTS.md  RECOVERY.md  REPLAY.md  API.md  OBSERVATORY.md
-│   ├── LAB.md  ATLAS_INTEGRATION.md
-│   ├── screenshots/           captured from the running application
-│   └── adr/                   architecture decision records
-└── .github/workflows/ci.yml   Rust (Linux + macOS), web checks and build, end-to-end workflow
+crates/
+  orbit-core/      event store, reconstruction, snapshots, replay, integrity (lib, tests, benches, examples)
+  orbit-lab/       registry, differential replay, performance, reliability, bundles, signing
+                   bins: orbit-lab (CLI), orbit-reliability (runner; feature "reliability")
+  orbit-api/       Axum HTTP API
+web/               Observatory (Next.js): src/app pages, src/lib typed client, tests/unit, tests/e2e
+scripts/           seed-demo.sh, validate-workflow.sh
+docs/              design and reference documents, adr/, assets/ (brand, architecture, screenshots)
+.github/workflows/ CI: Rust on Linux and macOS, web, end-to-end, dependency audit
 ```
 
-## Current limitations
+## Project status
 
-The lab's own limitations are listed in [docs/LAB.md](docs/LAB.md#known-limitations).
+ORBIT is complete in the scope it set out to cover, and v0.2.0 is its
+current release. It stays below 1.0 deliberately:
 
-- Single-event appends only. There is no atomic multi-event batch append yet.
-- One connection per `EventStore`. Calls through one instance are serialised,
-  and SQLite allows one writer per file.
-- Digests are **unkeyed**. On their own they detect corruption and naive edits,
-  but not an attacker who rewrites the file and recomputes every hash. Trusted
-  checkpoints kept outside the database detect such rewrites up to the
-  checkpoint. There are no keys or signatures. See
-  [RECOVERY.md](docs/RECOVERY.md#integrity-threat-model).
-- There is no stream deletion or archival, and no global (cross-stream) ordering.
-- Process crashes are tested. OS crashes and power loss are not simulated, and
-  durability under them rests on SQLite and the storage device.
-- No replication, consensus, or multi-host access. One host, local files.
-- Replay runs are capped at 100,000 events. Divergence is localised to the
-  first event whose resulting state differs, which is not necessarily its cause.
-- The API has **no authentication** and is meant for localhost. It refuses
-  non-loopback addresses unless explicitly allowed. All requests share one
-  SQLite connection, so it is a local debugging tool, not a multi-user server.
-- Projections are compiled in. The API offers `merge-patch`, `counter` and
-  `inventory`, and custom projections need a Rust change
-  (`crates/orbit-api/src/engines.rs`).
-- The UI keeps integrity checkpoints in browser local storage, which is
-  per-browser and not shared.
-- Benchmark results appear in the UI only after `cargo bench` has produced
-  them locally.
-- Local files only. The database must not be on a network file system.
-- Synchronous API. The future async server will call it through `spawn_blocking`.
-- Projections are Rust code compiled into the application. Reconstruction runs
-  one stream at a time, and the state must fit in memory.
-- There is no automatic snapshot scheduling or pruning. Snapshot digests are
-  unkeyed, and a consistent-but-wrong snapshot is only caught by
-  `compare_with_full_replay`.
-- Array diffs are positional. There is no LCS alignment.
+- the Rust library and HTTP APIs have no stability or deprecation policy;
+- it is a local, single-host tool (one SQLite writer, no authentication);
+- it has been tested on macOS and on GitHub's Ubuntu and macOS runners, not
+  on Windows.
 
-## Roadmap
+The history of how it was built, phase by phase, is in
+[CHANGELOG.md](CHANGELOG.md).
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1 | Core event engine and persistence | **done** |
-| 2 | Historical state reconstruction, snapshots and state diffs | **done** |
-| 3 | Crash recovery, concurrency control, integrity auditing, deterministic replay and divergence diagnostics | **done** |
-| 4 | Backend API (Axum) and web observability frontend | **done** |
-| 5 | Verification, hardening, documentation, release | **done** (`v0.1.0`) |
-| Sprint 6 | Audit and lab architecture ([ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md)) | **done** |
-| Sprint 7 | Experiment registry, implementation identity, differential replay ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
-| Sprint 8 | Divergence timeline, failure diagnosis, identity completeness, reproduction classes ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
-| Sprint 9 | Reliability scenarios, fault injection, multi-process registry safety ([RELIABILITY.md](docs/RELIABILITY.md)) | **done** (unreleased) |
-| Phase 9 | Integrated experiments, abandoned-experiment recovery, statistical performance lab, evidence bundles, Observatory integration ([PERFORMANCE.md](docs/PERFORMANCE.md), [EVIDENCE.md](docs/EVIDENCE.md)) | **done** (unreleased) |
-| Phase 10 | Final audit, defect closure and release | planned |
+## Contributing and license
 
-## Release status
-
-`v0.1.0` is a **pre-1.0 release**. It is verified from a clean checkout of the
-public repository, and every check listed above passes there and in CI. It is
-deliberately not `1.0.0`, because a 1.0 would promise stability that ORBIT does
-not yet have:
-
-- **The Rust library API is not stable.** It grew in every phase, and the
-  error enums are not `#[non_exhaustive]`, so adding a variant is a breaking
-  change.
-- **The HTTP API `v1` is new.** It has no deprecation policy, and engine reports
-  are typed only as `object` in OpenAPI.
-- **It is local-only by design.** There is no authentication, and a single
-  SQLite connection serves all requests.
-- **Durability under OS crashes and power loss is not independently tested.**
-  It relies on SQLite and the device.
-- **Platform coverage is narrow.** It has been tested on one macOS development
-  machine plus GitHub's Ubuntu and macOS runners. There is no MSRV policy and
-  no published crates or binaries.
-
-The on-disk formats are versioned: event store schema v3, lab registry
-schema v4, evidence bundle format 1. Databases created by every earlier
-phase are upgraded in place, and tests cover that from real fixtures.
-
-## Benchmarks: what has and has not been measured
-
-The recorded numbers in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#benchmarks)
-are real Criterion runs. Each is one run, on one Apple M3 (8 GB) laptop, with
-hardware and conditions listed:
-
-| Suite | Measured? |
-|-------|-----------|
-| `event_store` (Phase 1) | yes, one recorded run |
-| `reconstruction` (Phase 2) | yes, one recorded run |
-| `crash_lab` (Phase 3) | yes, one recorded run |
-| Performance lab workloads (Phase 9) | yes, one recorded run of each, 30 samples, in [docs/PERFORMANCE.md](docs/PERFORMANCE.md#recorded-measurements-one-run) |
-| HTTP API latency or throughput | **not measured**. The API only reports per-request server timings. |
-| Web UI performance | **not measured** |
-| Any other hardware or OS | **not measured** |
-
-CI runs every benchmark once in Criterion's `--test` mode, to catch breakage,
-but records no measurements.
-
-## Contributing, security, license
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
-Licensed under the [MIT License](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and what
+a change needs (tests, documentation, honest claims), and
+[SECURITY.md](SECURITY.md) to report a vulnerability. Licensed under the
+[MIT License](LICENSE).
