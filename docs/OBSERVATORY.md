@@ -51,6 +51,7 @@ scripts/seed-demo.sh
 | Replay Lab | Runs with their last outcome; recording (initial, snapshot or reconstructed start); execution with the recorded or another projection; evidence (classified outcome, expected and actual digests, first divergence with event id, final-state diff, violations, warnings, trace window); execution history; experiments | `ReplayLab::record`, `execute`, `inspect`, `experiment` |
 | Integrity | Whole-store verification with one pass/fail row per check, and per-stream verification against checkpoints kept in the browser's local storage, i.e. outside the database | `verify_store`, `checkpoint`, `verify_stream_against` |
 | Benchmarks | Criterion results (median with confidence interval, mean, throughput, measurement time) read from `target/criterion` | none (reads benchmark output files) |
+| Experiments (Sprint 7) | Lab experiments with outcome and reproducibility; a form to run a differential replay (stream, left and right implementation, optional reference, last event); the stored result: both implementation identities and fingerprints, input range, first divergence with its event and structural diff, final-state diff, failures, artifacts; artifact verification and reproduction, with the verification history | `orbit-lab`: `Lab::create_and_run`, `experiment`, `verify_artifacts`, `reproduce` (through `/api/v1/lab/*`) |
 
 ### Screenshots
 

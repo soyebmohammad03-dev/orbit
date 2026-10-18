@@ -27,7 +27,13 @@ cargo doc --workspace --no-deps --open        # API docs
 cargo run -p orbit-core --example quickstart  # end-to-end example (event store)
 cargo run -p orbit-core --example time_travel # reconstruction, snapshots, diff
 cargo run -p orbit-core --example crash_lab   # verification, checkpoints, replay, divergence
+cargo run -p orbit-lab -- implementations     # lab: registered implementations
+cargo run -p orbit-lab -- run --stream S --left orbit.counter --right example.counter-floor-at-zero
 ```
+
+The lab reads `data/orbit.db` and keeps its registry in `data/lab` (override
+with `--db`/`ORBIT_DB_PATH` and `--lab`/`ORBIT_LAB_DIR`). See [LAB.md](LAB.md)
+for every command, the result format and how to reproduce a result.
 
 Observatory:
 
@@ -41,11 +47,11 @@ cd web && npm run test:e2e                   # starts its own API and production
 
 CI (`.github/workflows/ci.yml`) has three jobs:
 
-1. **Rust** (Ubuntu and macOS): everything below, for both crates.
+1. **Rust** (Ubuntu and macOS): everything below, for all three crates.
 2. **Web**: Prettier, ESLint with zero warnings, `tsc`, Vitest, and the
    production build.
 3. **End-to-end**: builds `orbit-api`, installs Chromium, and runs the
-   Playwright workflow against a fresh SQLite database.
+   Playwright workflows against a fresh event store and lab registry.
 
 The Rust job runs, with `--locked`, on Ubuntu and macOS:
 
@@ -53,7 +59,9 @@ The Rust job runs, with `--locked`, on Ubuntu and macOS:
 - `clippy --all-targets --all-features`, plus `clippy --lib` with default
   features (the production build, without fault hooks);
 - `test` and `doc`;
-- `bench --no-run` and all three examples.
+- a check that `orbit-api`'s feature graph does not contain
+  `orbit-core/fault-injection`;
+- `bench --no-run`, all three examples and `orbit-lab implementations`.
 
 On Ubuntu it also runs every benchmark once, in Criterion's `--test` mode. That
 is a smoke test, not a measurement.
@@ -82,8 +90,14 @@ is a smoke test, not a measurement.
 | `tests/summaries.rs`        | Stream summaries, store statistics, recent events (used by the API) |
 | `orbit-api` `tests/api.rs`  | HTTP contract: every endpoint's success and error responses, validation, pagination bounds, conflicts, payload and body limits, projections, snapshots (including tampering), integrity success and failure, replay outcomes, experiments, overview, restarts, benchmarks, CORS |
 | `orbit-api` `tests/server.rs` | Real TCP server: concurrent optimistic appends over HTTP (exactly one winner), no duplicate sequences, persistence across a server restart |
+| `orbit-api` `tests/lab.rs`  | Lab endpoints: implementations, create/inspect/verify/reproduce, persistence across a restart, failed experiments, validation (unknown fields, kinds, ids), pagination, disabled lab, Host guard, no paths in responses, no lab tables in the event store |
+| `orbit-lab` `tests/differential.rs` | Equivalent, diverged (first divergence with event and diff), reconverged and multi-segment results, empty and single-event histories, divergence at boundary 0, missing/short/damaged histories, rejections and panics, nondeterminism (detected, declared, unchecked), canonical comparison, windows, agreement with the core replay trace, reproduction (pinned range, restart, missing implementation, damaged or different history) |
+| `orbit-lab` `tests/registry.rs` | Initialization and refusal of foreign or newer files, lifecycle transitions and refusals, triggers against raw SQL, persistence across restarts, pagination, concurrent registries, interrupted-run recovery with live and dead locks, identity changes, artifact verification (corrupted, missing), tampered records, atomic deduplicating writes, symlinks |
+| `orbit-lab` `tests/identity.rs` | Same name and version with different implementations, fingerprint stability under equivalent configuration, every identity field changing the fingerprint, the documented code-body limitation, id validation, duplicate ids, JSON round trip, spec digest canonicalization |
+| `orbit-lab` `tests/properties.rs` | Proptest: self-comparison is equivalent and its trace equals `ReplayLab::record`; the floor variant first diverges exactly where the counter first goes negative |
+| `orbit-lab` `tests/cli.rs`  | The `orbit-lab` binary: implementations, run (flags and `--spec`), list, show, verify, reproduce, error exits |
 | `web/tests/unit`            | API client (URLs, bodies, error envelope, network errors, timing header), formatters, DiffView, ErrorState and EmptyState, navigation, the Overview page's loading, empty, data, error/retry and unrun-check states |
-| `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API |
+| `web/tests/e2e`             | The complete workflow in Chromium, with every step checked in the UI and through the API; a differential replay run, inspected, verified and reproduced from the Experiments page, which must fit a 375 px screen |
 | `tests/reconstruction_properties.rs` | Proptest: snapshot-assisted equals full replay equals reference fold (counter and inventory, varied snapshot intervals and targets), the newest eligible snapshot is selected, deterministic diffs |
 
 Every integration test uses a real SQLite file in its own temporary directory.

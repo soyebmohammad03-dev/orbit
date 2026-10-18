@@ -6,6 +6,33 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Sprint 7: experiment registry and differential replay
+
+- `crates/orbit-lab`, built only on `orbit-core`'s public API. `orbit-core`'s
+  code, event format and schema are unchanged.
+  - An experiment registry in its own SQLite database (`lab.db`, application
+    id `ORLB`, schema v1): enforced lifecycle `created → running →
+    completed | failed`, immutability triggers, a status/column `CHECK`
+    constraint, canonical spec digests, append-only verification history, and
+    interrupted-run detection with OS file locks.
+  - Content-addressed artifact storage with verification on every read.
+  - `ImplementationDescriptor`: a unique id plus a fingerprint over the
+    identity fields. Two implementations with the same name and projection
+    key are distinguishable.
+  - Differential replay: lockstep execution over one verified, ordered
+    history; canonical state comparison at every boundary; the first
+    divergence with a structural diff; divergent segments; implementation
+    failures (including caught panics); a determinism double-check; and
+    reproduction from the persisted spec.
+  - Example variants `example.counter-floor-at-zero` and
+    `example.inventory-untracked-shipments`.
+  - The `orbit-lab` CLI: `implementations`, `run`, `list`, `show`, `verify`,
+    `reproduce`.
+- `orbit-api`: `/api/v1/lab/*` endpoints, and `ORBIT_LAB_DIR` (default
+  `data/lab`; empty disables).
+- Observatory: an **Experiments** page.
+- Docs: `docs/LAB.md`, ADR 0009.
+
 ## [0.1.0] - 2026-10-18
 
 The first tagged release, a pre-1.0 release. It contains all five planned

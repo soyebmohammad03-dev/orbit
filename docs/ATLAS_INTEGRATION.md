@@ -8,6 +8,20 @@ or change.
 
 Audited state: `main` at `7cc2cae`, tag `v0.1.0`, on 2026-10-18.
 
+> **Status update (Sprint 7).** The registry, implementation identity and
+> differential replay parts of Sprint 7 are implemented in `crates/orbit-lab`
+> ([LAB.md](LAB.md)). The implementation differs from this plan in a few ways:
+> - the lifecycle is `created → running → completed | failed`, and
+>   interrupted runs become `failed` / `interrupted` rather than `abandoned`;
+> - workloads come only from existing streams; seeded generators are not
+>   implemented;
+> - there is no behavioural-probe fingerprint; behaviour is established by
+>   differential replay itself;
+> - `ignore_paths` is not implemented;
+> - `rust-toolchain.toml` was not added.
+>
+> Sprint 8 onward is still a plan.
+
 ## 1. Verified repository and release state
 
 | Check | Result | How it was checked |

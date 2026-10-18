@@ -25,6 +25,7 @@ curl http://127.0.0.1:7878/api/v1/health
 | `ORBIT_BENCHMARK_DIR` | `target/criterion` if present | Criterion results served read-only by `/benchmarks`. An empty value disables it. |
 | `ORBIT_API_ALLOWED_HOSTS` | none | Extra host names accepted in the `Host` header, comma-separated. `localhost`, `127.0.0.1` and `[::1]` are always accepted. |
 | `ORBIT_API_REQUEST_TIMEOUT_SECS` | `30` | Per-request deadline (1–600 s). Requests over it get `503 request_timeout`. |
+| `ORBIT_LAB_DIR` | `data/lab` | Lab directory: the experiment registry `lab.db` and artifacts. Created on first start. Separate from the event store. An empty value disables the lab endpoints (`503 lab_unavailable`). |
 | `ORBIT_DURABILITY`, `ORBIT_BUSY_TIMEOUT_MS`, `ORBIT_MAX_PAYLOAD_BYTES`, `ORBIT_MAX_METADATA_BYTES` | see [DEVELOPMENT.md](DEVELOPMENT.md#configuration) | Store settings |
 | `RUST_LOG` | `info,tower_http=info` | Log filter |
 
@@ -108,7 +109,32 @@ curl http://127.0.0.1:7878/api/v1/health
 | `POST /replays/{run_id}/executions` | `{projection?}` executes the run (default: the recorded projection). **Divergence, mismatch and integrity failures are 201 outcomes.** | 201 | 400, 404 |
 | `POST /streams/{id}/experiments` | `{projection?, to?, snapshot_policy?}` returns an `ExperimentReport` | 201 | 404, 422 |
 | `GET /benchmarks` | Criterion results (median, CI, mean, measurement time) | 200 | |
+| `GET /lab/…` | See [Lab endpoints](#lab-endpoints) | | |
 | `GET /openapi.json` | The OpenAPI document | 200 | |
+
+## Lab endpoints
+
+These endpoints serve the experiment lab ([LAB.md](LAB.md)). Its registry is
+a separate database, and these endpoints never write to the event store.
+Responses are the lab's own serialized records.
+
+| Method and path | Purpose | Success | Notable errors |
+|-----------------|---------|---------|----------------|
+| `GET /lab/implementations` | Registered implementation descriptors (id, name, declared projection, type, fingerprint) | 200 | 503 `lab_unavailable` |
+| `GET /lab/experiments?before=&limit=` | Experiment summaries, newest first, with a cursor (`next_before`) | 200 | 400 `invalid_parameter`, 400 `invalid_experiment_id` |
+| `POST /lab/experiments` | `{kind: "differential_replay", spec: {stream, left, right, from?, to?, reference?, determinism_check?}}` validates, records and runs an experiment. **A missing or damaged history is a `failed` experiment (201), not an HTTP error.** | 201 | 400 `invalid_spec` (unknown fields are rejected), 400 `unknown_implementation`, 400 `unsupported_experiment_kind` |
+| `GET /lab/experiments/{id}` | The stored experiment (spec, descriptors, build, lifecycle timestamps, input range, result, artifacts) and its verifications | 200 | 400, 404 `experiment_not_found` |
+| `POST /lab/experiments/{id}/verify` | Re-hashes the stored spec, result and every artifact. Records and returns the report (`intact` or `damaged`). | 200 | 404, 409 `invalid_state` (not finished) |
+| `POST /lab/experiments/{id}/reproduce` | Re-executes from the stored spec and compares result digests (`reproduced`, `differs`, `history_changed`, `history_unavailable`, `implementation_unavailable`). Records the attempt. | 201 | 404, 409 `invalid_state` (not completed) |
+
+`POST /lab/experiments` runs synchronously. If it outlasts the request
+deadline the response is `503 request_timeout`, and the experiment still
+finishes and is recorded.
+
+```bash
+curl -s -X POST $API/lab/experiments -H 'content-type: application/json' -d \
+  '{"kind":"differential_replay","spec":{"stream":"counter-demo","left":"orbit.counter","right":"example.counter-floor-at-zero"}}'
+```
 
 ## Errors
 

@@ -5,6 +5,10 @@ The workspace has two crates and a web application:
 - **`crates/orbit-core`.** The engine, built in Phases 1–3.
 - **`crates/orbit-api`.** The HTTP API, added in Phase 4.
 - **`web/`.** The Observatory UI, added in Phase 4.
+- **`crates/orbit-lab`.** The experiment registry and differential replay,
+  added in Sprint 7. It uses only `orbit-core`'s public API, reads event
+  stores, and keeps its own database (see [LAB.md](LAB.md) and
+  [ADR 0009](adr/0009-orbit-lab-crate-and-registry.md)).
 
 The engine stays authoritative. The API and UI are transport and presentation
 over it (see [ADR 0008](adr/0008-observatory-architecture.md),
@@ -14,7 +18,10 @@ over it (see [ADR 0008](adr/0008-observatory-architecture.md),
 flowchart LR
     ui["web/ (Next.js, client-rendered pages)"] -->|"HTTP /api/v1 JSON"| api["orbit-api (Axum)"]
     api -->|"spawn_blocking"| core["orbit-core"]
-    core --> db[("SQLite (WAL)")]
+    api -->|"spawn_blocking"| lab["orbit-lab"]
+    lab -->|"public API, read only"| core
+    core --> db[("event store: SQLite (WAL)")]
+    lab --> labdb[("lab.db + artifacts")]
 ```
 
 Inside `orbit-core`, Phases 1–3 are organised as follows (see
@@ -191,9 +198,10 @@ Smaller choices:
 
 ## Extension points for later work
 
-All five phases are complete (`v0.1.0`). The proposed next program, a lab for
+All five phases are complete (`v0.1.0`). The next program, a lab for
 differential replay, reliability experiments, statistical benchmarks and
 evidence bundles, is planned in [ATLAS_INTEGRATION.md](ATLAS_INTEGRATION.md).
-None of it is implemented yet. Still out of scope: a read-connection pool
+Sprint 7 implemented its first part, `orbit-lab` ([LAB.md](LAB.md)). Evidence
+bundles and the reliability and performance labs are not implemented. Still out of scope: a read-connection pool
 behind `EventStore` (only if multi-user API load ever matters), and OS-crash
 and power-loss testing, which would need a VM-level harness.

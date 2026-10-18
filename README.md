@@ -15,6 +15,10 @@ reconstructs, compares and deterministically replays historical state.
 >   real engine.
 > - Phase 5: verification, hardening and release.
 >
+> Since `v0.1.0` (unreleased, on `main`): **Sprint 7** adds `orbit-lab`, an
+> experiment registry with differential replay of two projection
+> implementations. See [docs/LAB.md](docs/LAB.md).
+>
 > The HTTP API is for **trusted local use only**: it has no authentication.
 
 ![ORBIT Observatory: Time Travel](docs/screenshots/time-travel.png)
@@ -130,14 +134,38 @@ state, diffs two of them, and names the events responsible for each change.
     stream can be reconstructed and diffed.
   - Stream summaries, store statistics and a recent-activity query.
 
+## Added after v0.1.0: the experiment lab (Sprint 7)
+
+- **`crates/orbit-lab`.** A separate crate, built only on `orbit-core`'s
+  public API. It never writes to an event store. It provides:
+  - **an experiment registry** in its own SQLite file (`lab.db`), with
+    migrations, an enforced lifecycle (`created → running → completed |
+    failed`), immutable records, canonical spec digests, and detection of
+    interrupted runs;
+  - **content-addressed artifacts**, verified on every read;
+  - **implementation identities**, so two implementations declaring the same
+    projection name and version are distinguishable;
+  - **differential replay**: both implementations fold the same verified,
+    ordered events in lockstep. States are compared canonically at every
+    boundary, with the first divergence, its structural diff, divergent
+    segments, implementation failures, a determinism double-check, and
+    reproduction from the stored spec.
+- **Interfaces.**
+  - an `orbit-lab` CLI;
+  - five `/api/v1/lab/*` endpoints ([docs/API.md](docs/API.md#lab-endpoints));
+  - an **Experiments** page in the Observatory.
+- Design and limitations are in [docs/LAB.md](docs/LAB.md) and
+  [ADR 0009](docs/adr/0009-orbit-lab-crate-and-registry.md).
+
 ## Tests
 
 | Suite | Count | Runs against |
 |-------|-------|--------------|
 | `orbit-core` unit + integration + doc | 44 + 126 + 4 | real SQLite files (126 includes 9 property tests and 2 child-process entry points) |
-| `orbit-api` unit + HTTP contract + hardening + TCP | 7 + 16 + 6 + 1 | the real router and engine on temporary databases |
-| Web unit and component (Vitest) | 21 | the API client, components and the Overview page, with mocked responses |
-| End-to-end (Playwright) | 2 | a real `orbit-api` + production web build + an empty temporary SQLite file |
+| `orbit-api` unit + HTTP contract + hardening + lab + TCP | 7 + 16 + 6 + 7 + 1 | the real router and engine on temporary databases |
+| `orbit-lab` unit + differential + registry + identity + properties + CLI + doc | 3 + 16 + 11 + 7 + 2 + 2 + 1 | real event stores and registries in temporary directories (the CLI test runs the binary) |
+| Web unit and component (Vitest) | 26 | the API client, components, the Overview and Experiments views, with mocked responses |
+| End-to-end (Playwright) | 3 | a real `orbit-api` + production web build + empty temporary SQLite files (event store and lab registry) |
 
 Criterion suites cover the event store, reconstruction, and Phase 3's
 concurrency, verification, replay and failure paths.
@@ -146,6 +174,14 @@ concurrency, verification, replay and failure paths.
 
 ```text
 web/ (Next.js) ──HTTP /api/v1──▶ crates/orbit-api (Axum) ──spawn_blocking──▶ crates/orbit-core ──▶ SQLite
+
+crates/orbit-lab (Sprint 7; uses orbit-core's public API, reads event stores only)
+├── registry     lab.db: experiments, lifecycle, artifacts, verifications (SQLite)
+├── artifacts    content-addressed files under artifacts/sha256/
+├── identity     ImplementationDescriptor, fingerprints, BuildInfo
+├── catalog      Implementation / Stepper, the Projection adapter, built-in catalog
+├── differential lockstep replay, canonical comparison, first divergence
+└── lab          Lab: create, run, verify, reproduce; interrupted-run recovery
 
 crates/orbit-api
 ├── routes       thin handlers: validate → engine call → DTO/report
@@ -270,7 +306,7 @@ fn time_travel(store: &EventStore, stream: &StreamId) -> Result<(), Box<dyn std:
 ## Tests, lints and benchmarks
 
 ```bash
-cargo test --workspace                                 # all Rust tests (core + API)
+cargo test --workspace                                 # all Rust tests (core + API + lab)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo doc --workspace --no-deps
@@ -291,6 +327,7 @@ their hardware and conditions.
 .
 ├── Cargo.toml                 workspace manifest (shared lints)
 ├── crates/orbit-api/          Axum HTTP API (src/routes, tests/ contract + TCP tests)
+├── crates/orbit-lab/          experiment registry, differential replay, orbit-lab CLI (src/bin)
 ├── web/                       Next.js Observatory (src/app pages, src/lib client, tests/unit, tests/e2e)
 ├── scripts/seed-demo.sh       demonstration data through the API
 ├── crates/orbit-core/
@@ -302,12 +339,15 @@ their hardware and conditions.
 ├── docs/
 │   ├── ARCHITECTURE.md  EVENT_MODEL.md  STORAGE_DESIGN.md  DEVELOPMENT.md
 │   ├── RECONSTRUCTION.md  SNAPSHOTS.md  RECOVERY.md  REPLAY.md  API.md  OBSERVATORY.md
+│   ├── LAB.md  ATLAS_INTEGRATION.md
 │   ├── screenshots/           captured from the running application
 │   └── adr/                   architecture decision records
 └── .github/workflows/ci.yml   Rust (Linux + macOS), web checks and build, end-to-end workflow
 ```
 
 ## Current limitations
+
+The lab's own limitations are listed in [docs/LAB.md](docs/LAB.md#known-limitations).
 
 - Single-event appends only. There is no atomic multi-event batch append yet.
 - One connection per `EventStore`. Calls through one instance are serialised,
@@ -351,9 +391,12 @@ their hardware and conditions.
 | 3 | Crash recovery, concurrency control, integrity auditing, deterministic replay and divergence diagnostics | **done** |
 | 4 | Backend API (Axum) and web observability frontend | **done** |
 | 5 | Verification, hardening, documentation, release | **done** (`v0.1.0`) |
+| Sprint 6 | Audit and lab architecture ([ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md)) | **done** |
+| Sprint 7 | Experiment registry, implementation identity, differential replay ([LAB.md](docs/LAB.md)) | **done** (unreleased) |
 
-The proposed next program (Sprint 7 onward, not yet implemented) is in
-[docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md).
+Sprint 8 onward (evidence bundles, reliability and performance labs) is
+planned in [docs/ATLAS_INTEGRATION.md](docs/ATLAS_INTEGRATION.md) and not
+implemented.
 
 ## Release status
 
