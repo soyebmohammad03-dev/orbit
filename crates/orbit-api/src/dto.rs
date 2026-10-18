@@ -583,6 +583,16 @@ pub struct ExperimentDetail {
     pub verifications: Vec<Value>,
 }
 
+/// Query of `GET /api/v1/lab/experiments/{id}/trace`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TraceQuery {
+    /// First boundary to return (default: the experiment's first compared boundary).
+    pub from: Option<u64>,
+    /// Page size, 1–500 (default 50).
+    pub limit: Option<usize>,
+}
+
 /// Result of an artifact check.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ArtifactVerificationResponse {

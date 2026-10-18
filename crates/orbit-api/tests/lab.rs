@@ -246,3 +246,84 @@ async fn lab_endpoints_keep_the_host_guard_and_leak_no_paths() {
     let text = body.to_string();
     assert!(!text.contains(api.dir.path().to_str().unwrap()), "{text}");
 }
+
+#[tokio::test]
+async fn the_timeline_trace_and_identity_are_served() {
+    let api = TestApi::with_lab();
+    seed_counter(
+        &api,
+        "t",
+        &[
+            ("incremented", 1),
+            ("decremented", 3),
+            ("incremented", 5),
+            ("decremented", 9),
+        ],
+    )
+    .await;
+    let (_, created) = api
+        .post(
+            "/api/v1/lab/experiments",
+            differential("t", "orbit.counter", "example.counter-floor-at-zero"),
+        )
+        .await;
+    let r = &created["result"];
+    assert_eq!(r["result_version"], 2);
+    assert_eq!(r["semantics"]["version"], 1);
+    // b2: -2/0 differ, b3: 3/5 differ, b4: -6/0 differ.
+    assert_eq!(r["timeline"]["intervals_total"], 1);
+    assert_eq!(r["timeline"]["intervals"][0]["first"], 2);
+    assert_eq!(r["timeline"]["intervals"][0]["end"], "open_at_end");
+    assert_eq!(r["timeline"]["intervals"][0]["exit"]["boundary"], 4);
+    assert_eq!(created["identity"]["completeness"], "executable");
+    let id = created["id"].as_str().unwrap();
+
+    let (status, page) = api
+        .get(&format!(
+            "/api/v1/lab/experiments/{id}/trace?from=1&limit=2"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let entries: Vec<(u64, bool)> = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["boundary"].as_u64().unwrap(),
+                e["equal"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(entries, [(1, true), (2, false)]);
+    assert_eq!(page["next_from"], 3);
+    assert_eq!(page["boundaries_total"], 5);
+    let (status, body) = api
+        .get(&format!("/api/v1/lab/experiments/{id}/trace?limit=501"))
+        .await;
+    assert_error(status, &body, StatusCode::BAD_REQUEST, "invalid_parameter");
+
+    let (_, failed) = api
+        .post(
+            "/api/v1/lab/experiments",
+            differential("nope", "orbit.counter", "orbit.counter"),
+        )
+        .await;
+    let (status, body) = api
+        .get(&format!(
+            "/api/v1/lab/experiments/{}/trace",
+            failed["id"].as_str().unwrap()
+        ))
+        .await;
+    assert_error(status, &body, StatusCode::CONFLICT, "invalid_state");
+
+    let (status, reproduced) = api
+        .post(
+            &format!("/api/v1/lab/experiments/{id}/reproduce"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(reproduced["detail"]["compared"], "full_result");
+    assert_eq!(reproduced["detail"]["build"]["same_executable"], true);
+}

@@ -22,7 +22,7 @@ use crate::routes::{integrity, lab, replay, snapshots, state, streams, system};
         integrity::checkpoint, integrity::verify_stream, integrity::verify_store,
         replay::list_runs, replay::create_run, replay::get_run, replay::execute_run, replay::run_experiment,
         lab::list_implementations, lab::list_experiments, lab::create_experiment, lab::get_experiment,
-        lab::verify_experiment, lab::reproduce_experiment,
+        lab::verify_experiment, lab::reproduce_experiment, lab::get_trace,
     ),
     tags(
         (name = "system", description = "Health, capabilities, overview, benchmarks"),

@@ -13,7 +13,7 @@ use super::page_limit;
 use crate::AppState;
 use crate::dto::{
     ArtifactVerificationResponse, CreateExperimentRequest, ExperimentDetail, ExperimentPage,
-    ExperimentPageQuery, ImplementationList,
+    ExperimentPageQuery, ImplementationList, TraceQuery,
 };
 use crate::error::{ApiError, ErrorResponse};
 use crate::extract::{ApiJson, ApiPath, ApiQuery};
@@ -193,6 +193,28 @@ pub async fn reproduce_experiment(
     with_lab(&state, move |lab, store| {
         let verification = lab.reproduce(id, store)?;
         Ok((StatusCode::CREATED, ApiJson(json(&verification)?)))
+    })
+    .await
+}
+
+/// A page of a completed experiment's per-boundary trace: both state
+/// digests and whether they are equal, read from the verified trace
+/// artifacts.
+#[utoipa::path(get, path = "/api/v1/lab/experiments/{experiment_id}/trace", tag = "lab",
+    params(("experiment_id" = String, Path, description = "Experiment id (UUID)"), TraceQuery),
+    responses((status = 200, description = "TracePage", body = Object), (status = 400, body = ErrorResponse),
+              (status = 404, body = ErrorResponse),
+              (status = 409, description = "The experiment is not completed", body = ErrorResponse),
+              (status = 500, description = "A trace artifact is missing or corrupted", body = ErrorResponse)))]
+pub async fn get_trace(
+    State(state): State<AppState>,
+    ApiPath(raw): ApiPath<String>,
+    ApiQuery(query): ApiQuery<TraceQuery>,
+) -> Result<ApiJson<Value>, ApiError> {
+    let id = experiment_id(&raw)?;
+    let limit = page_limit(query.limit)?;
+    with_lab(&state, move |lab, _| {
+        Ok(ApiJson(json(&lab.trace(id, query.from, limit)?)?))
     })
     .await
 }
