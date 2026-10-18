@@ -98,6 +98,8 @@ export const LAB_OUTCOME_LABELS: Record<string, string> = {
     invariants_preserved: "Invariants preserved",
     invariant_violated: "Invariant violated",
     inconclusive: "Inconclusive",
+    smoke: "Smoke run (not a measurement)",
+    measurement: "Measurement",
 };
 
 /**
@@ -120,7 +122,76 @@ export function labOutcomeTone(outcome: string | null | undefined): Tone {
             return "ok";
         case "inconclusive":
             return "warn";
+        case "measurement":
+            return "info";
         default:
             return "neutral";
     }
+}
+
+/** Labels of performance comparison verdicts. Suspected findings are never shown as established. */
+export const VERDICT_LABELS: Record<string, string> = {
+    incompatible: "Incompatible: not compared",
+    insufficient_samples: "Insufficient samples",
+    within_threshold: "Within threshold",
+    suspected_regression: "Suspected regression (not statistically supported)",
+    suspected_improvement: "Suspected improvement (not statistically supported)",
+    regression: "Regression (statistically supported)",
+    improvement: "Improvement (statistically supported)",
+};
+
+export function verdictTone(verdict: string): Tone {
+    switch (verdict) {
+        case "within_threshold":
+            return "ok";
+        case "improvement":
+            return "info";
+        case "regression":
+            return "fail";
+        case "suspected_regression":
+        case "suspected_improvement":
+        case "insufficient_samples":
+            return "warn";
+        default:
+            return "neutral";
+    }
+}
+
+/** Labels of reproduction statuses. */
+export const REPRODUCTION_LABELS: Record<string, string> = {
+    reproduced: "Reproduced",
+    differs: "Differs",
+    history_changed: "History changed",
+    configuration_mismatch: "Configuration mismatch",
+    implementation_unavailable: "Implementation unavailable",
+    artifact_missing: "Artifact missing or damaged",
+    history_unavailable: "History unavailable",
+    not_reproducible: "Not reproducible",
+    inconclusive: "Inconclusive",
+    unsupported: "Not supported here",
+    intact: "Intact",
+    damaged: "Damaged",
+};
+
+/** Tone of a verification status: only `reproduced` and `intact` are confirmations. */
+export function reproductionTone(status: string): Tone {
+    switch (status) {
+        case "reproduced":
+        case "intact":
+            return "ok";
+        case "inconclusive":
+        case "unsupported":
+        case "history_unavailable":
+        case "implementation_unavailable":
+            return "warn";
+        default:
+            return "fail";
+    }
+}
+
+/** A relative change as a signed percentage. */
+export function formatPercent(fraction: number | null | undefined, digits = 1): string {
+    if (fraction === null || fraction === undefined || !Number.isFinite(fraction)) return "—";
+    const pct = fraction * 100;
+    return `${pct > 0 ? "+" : ""}${pct.toFixed(digits)} %`;
 }

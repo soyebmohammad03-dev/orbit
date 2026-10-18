@@ -1,8 +1,9 @@
 "use client";
 
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { ReliabilityCatalog, ReliabilitySummary } from "./reliability";
+import { PerformanceSummary } from "@/components/performance";
 import {
     ComparisonView,
     DiagnosisView,
@@ -33,7 +34,15 @@ import {
     Th,
 } from "@/components/ui";
 import { api } from "@/lib/api";
-import { LAB_OUTCOME_LABELS, formatMicros, formatTimestamp, labOutcomeTone, shortDigest } from "@/lib/format";
+import {
+    LAB_OUTCOME_LABELS,
+    REPRODUCTION_LABELS,
+    formatMicros,
+    formatTimestamp,
+    labOutcomeTone,
+    reproductionTone,
+    shortDigest,
+} from "@/lib/format";
 import type {
     ArtifactVerificationResponse,
     ExperimentRecord,
@@ -64,7 +73,7 @@ export function ExperimentsView() {
         <>
             <PageHeader
                 title="Experiments"
-                description="Differential replay: two projection implementations fold the same verified, ordered history, and their canonical states are compared after every event. Results, identities and artifacts are kept in the lab registry, a database separate from the event store."
+                description="Every lab experiment: differential replays, performance measurements and reliability results, with their lifecycle, identity, artifacts, verification and reproduction history, and evidence bundles. The registry is a database separate from the event store."
             />
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
                 <div className="flex min-w-0 flex-col gap-6">
@@ -110,10 +119,10 @@ export function ExperimentsView() {
                                                 </button>
                                             </Td>
                                             <Td className="font-mono text-xs">
-                                                {e.kind === "reliability" ? "reliability" : e.stream}
+                                                {e.kind === "differential_replay" ? e.stream : e.kind}
                                             </Td>
                                             <Td className="font-mono text-xs">
-                                                {e.kind === "reliability" ? "—" : `${e.left} ↔ ${e.right}`}
+                                                {e.kind === "differential_replay" ? `${e.left} ↔ ${e.right}` : "—"}
                                             </Td>
                                             <Td>
                                                 <LabOutcomeBadge record={e} />
@@ -233,12 +242,32 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
     const [refresh, setRefresh] = useState(0);
     const detail = useApi(() => api.getLabExperiment(id), `lab:${id}:${refresh}`);
     const [verified, setVerified] = useState<ArtifactVerificationResponse | null>(null);
+    const [attempt, setAttempt] = useState<string | null>(null);
     const verify = useAction(() => api.verifyLabExperiment(id));
-    const reproduce = useAction(() => api.reproduceLabExperiment(id));
+    const reproduce = useAction(() => api.reproduceAny(id));
     const reload = () => {
         setRefresh((n) => n + 1);
         onChanged();
     };
+    const status = detail.data?.experiment.status;
+    const waiting = status === "created" || status === "running" || attempt !== null;
+    const { reload: poll } = detail;
+    // Background work (a performance measurement, or a linked reproduction
+    // attempt): poll until the record says it is finished.
+    useEffect(() => {
+        if (!waiting) return;
+        const timer = setInterval(async () => {
+            if (attempt) {
+                const a = await api.getLabExperiment(attempt).catch(() => null);
+                if (a && (a.experiment.status === "completed" || a.experiment.status === "failed")) {
+                    setAttempt(null);
+                    onChanged();
+                }
+            }
+            poll();
+        }, 1000);
+        return () => clearInterval(timer);
+    }, [waiting, attempt, poll, onChanged]);
     if (detail.loading && !detail.data) return <Loading />;
     if (detail.error) return <ErrorState error={detail.error} onRetry={detail.reload} />;
     if (!detail.data) return null;
@@ -248,6 +277,8 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
         <>
             {experiment.kind === "reliability" ? (
                 <ReliabilitySummary record={experiment} />
+            ) : experiment.kind === "performance" ? (
+                <PerformanceSummary record={experiment} />
             ) : (
                 <ExperimentSummary record={experiment} />
             )}
@@ -277,16 +308,34 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
                                     : undefined
                             }
                             onClick={async () => {
-                                if (await reproduce.run()) reload();
+                                const r = await reproduce.run();
+                                if (!r) return;
+                                if ("verified_at" in r) reload();
+                                else setAttempt(r.id);
                             }}
                         >
-                            Reproduce
+                            {attempt ? "Measuring again…" : "Reproduce"}
                         </Button>
+                        {finished ? (
+                            <a
+                                className="inline-flex items-center rounded-md border border-border-strong px-3 py-1.5 text-sm text-text hover:bg-surface-2"
+                                href={api.bundleUrl(id)}
+                                download
+                            >
+                                Export bundle
+                            </a>
+                        ) : null}
                     </>
                 }
             >
                 {verify.error ? <ErrorState title="Verification failed" error={verify.error} /> : null}
                 {reproduce.error ? <ErrorState title="Reproduction failed" error={reproduce.error} /> : null}
+                {attempt ? (
+                    <p role="status" className="mb-3 text-sm text-muted">
+                        Measuring the same specification again as experiment <Mono>{shortDigest(attempt, 8, 4)}</Mono>;
+                        the result is appended here when it finishes.
+                    </p>
+                ) : null}
                 {verified ? (
                     <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
                         <Badge tone={verified.report.status === "intact" ? "ok" : "fail"}>
@@ -305,8 +354,6 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
     );
 }
 
-const VERIFIED_OK = ["intact", "reproduced"];
-
 function VerificationList({ items }: { items: VerificationRecord[] }) {
     if (items.length === 0) return <p className="text-sm text-muted">Not verified yet.</p>;
     return (
@@ -318,8 +365,8 @@ function VerificationList({ items }: { items: VerificationRecord[] }) {
                 return (
                     <li key={v.id} className="flex flex-col gap-1">
                         <span className="flex flex-wrap items-center gap-2">
-                            <Badge tone={VERIFIED_OK.includes(v.status) ? "ok" : "fail"}>
-                                {v.status.replaceAll("_", " ")}
+                            <Badge tone={reproductionTone(v.status)}>
+                                {REPRODUCTION_LABELS[v.status] ?? v.status.replaceAll("_", " ")}
                             </Badge>
                             <span className="text-muted">{v.kind}</span>
                             <span className="text-xs text-faint">{formatTimestamp(v.verified_at)}</span>
@@ -332,6 +379,10 @@ function VerificationList({ items }: { items: VerificationRecord[] }) {
                                     : d.compared === "traces_and_summary"
                                       ? "Compared both traces and the result summary (the original result has an older layout)."
                                       : null}
+                                {d.compared === "a new measurement of the same specification" &&
+                                typeof d.attempt_experiment_id === "string"
+                                    ? `Measured again as ${shortDigest(d.attempt_experiment_id, 8, 4)} and compared.`
+                                    : null}
                                 {differences.length > 0 ? ` Differs in: ${differences.join(", ")}.` : null}
                                 {typeof d.recorded_outcome === "string" && typeof d.reproduced_outcome === "string"
                                     ? ` Original outcome ${d.recorded_outcome}, re-run ${d.reproduced_outcome}.`

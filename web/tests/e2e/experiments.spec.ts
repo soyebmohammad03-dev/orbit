@@ -58,9 +58,9 @@ test("run, inspect, verify and reproduce a differential replay", async ({ page, 
     await expect(trace.getByRole("link", { name: "#2" })).toHaveAttribute("href", `/events?stream=${stream}&seq=2`);
 
     await page.getByRole("button", { name: "Verify artifacts" }).click();
-    await expect(page.getByRole("list", { name: "Verification history" })).toContainText("intact");
+    await expect(page.getByRole("list", { name: "Verification history" })).toContainText("Intact");
     await page.getByRole("button", { name: "Reproduce" }).click();
-    await expect(page.getByRole("list", { name: "Verification history" })).toContainText("reproduced");
+    await expect(page.getByRole("list", { name: "Verification history" })).toContainText("Reproduced");
     await expect(page.getByRole("list", { name: "Verification history" })).toContainText(
         "Compared the full result document and both traces.",
     );

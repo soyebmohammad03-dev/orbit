@@ -35,6 +35,14 @@ import type {
     StreamPage,
     ScenarioInfo,
     TracePage,
+    BundleVerification,
+    CompareResponse,
+    ImportedBundle,
+    ImportedBundleSummary,
+    ImportOutcome,
+    PerformanceSpec,
+    ValidationReport,
+    WorkloadCatalog,
 } from "./types";
 
 /** An error returned by the API (structured envelope) or a transport failure. */
@@ -85,13 +93,19 @@ export function createClient(options: ClientOptions = {}) {
     const baseUrl = (options.baseUrl ?? API_BASE_URL).replace(/\/+$/, "");
     const doFetch: Fetch = options.fetch ?? ((...args) => fetch(...args));
 
-    async function timed<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<Timed<T>> {
+    async function timed<T>(
+        method: "GET" | "POST",
+        path: string,
+        body?: unknown,
+        raw?: Blob | string,
+    ): Promise<Timed<T>> {
         let response: Response;
         try {
+            const payload = raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body);
             response = await doFetch(baseUrl + path, {
                 method,
-                headers: body === undefined ? undefined : { "content-type": "application/json" },
-                body: body === undefined ? undefined : JSON.stringify(body),
+                headers: payload === undefined ? undefined : { "content-type": "application/json" },
+                body: payload,
                 cache: "no-store",
             });
         } catch (cause) {
@@ -130,6 +144,8 @@ export function createClient(options: ClientOptions = {}) {
 
     const get = async <T>(path: string) => (await timed<T>("GET", path)).data;
     const post = async <T>(path: string, body: unknown = {}) => (await timed<T>("POST", path, body)).data;
+    /** Posts a file's bytes unchanged (bundles must not be re-serialized). */
+    const postRaw = async <T>(path: string, raw: Blob | string) => (await timed<T>("POST", path, undefined, raw)).data;
 
     return {
         baseUrl,
@@ -179,7 +195,7 @@ export function createClient(options: ClientOptions = {}) {
         ) => post<ExperimentReport>(`/streams/${seg(id)}/experiments`, body),
 
         labImplementations: () => get<{ implementations: ImplementationDescriptor[] }>("/lab/implementations"),
-        listLabExperiments: (p: { before?: string; limit?: number } = {}) =>
+        listLabExperiments: (p: { before?: string; limit?: number; kind?: string } = {}) =>
             get<{ experiments: ExperimentSummary[]; next_before: string | null }>(`/lab/experiments${query(p)}`),
         createDifferential: (spec: DifferentialSpec) =>
             post<ExperimentRecord>("/lab/experiments", { kind: "differential_replay", spec }),
@@ -189,6 +205,34 @@ export function createClient(options: ClientOptions = {}) {
         reliabilityScenarios: () => get<{ scenarios: ScenarioInfo[]; execution: string }>("/lab/reliability/scenarios"),
         getLabTrace: (id: string, p: { from?: number; limit?: number } = {}) =>
             get<TracePage>(`/lab/experiments/${seg(id)}/trace${query(p)}`),
+
+        performanceWorkloads: () => get<WorkloadCatalog>("/lab/performance/workloads"),
+        /** Accepted (202): returns the experiment in status `created`; it is measured in the background. */
+        createPerformance: (spec: PerformanceSpec) =>
+            post<ExperimentRecord>("/lab/experiments", { kind: "performance", spec }),
+        comparePerformance: (body: {
+            baseline?: string | null;
+            candidates: string[];
+            threshold_percent?: number;
+            alpha?: number;
+        }) => post<CompareResponse>("/lab/performance/compare", body),
+        /** Reproduction: a verification record (201), or for performance experiments the linked attempt (202). */
+        reproduceAny: (id: string) =>
+            post<VerificationRecord | ExperimentRecord>(`/lab/experiments/${seg(id)}/reproduce`),
+
+        /** Download URL of an experiment's evidence bundle. */
+        bundleUrl: (id: string, history = true) =>
+            `${baseUrl}/lab/experiments/${seg(id)}/bundle${history ? "" : "?history=false"}`,
+        validateBundle: (file: Blob | string) => postRaw<ValidationReport>("/lab/bundles/validate", file),
+        importBundle: (file: Blob | string) => postRaw<ImportOutcome>("/lab/bundles", file),
+        listBundles: (p: { before?: number; limit?: number } = {}) =>
+            get<{ bundles: ImportedBundleSummary[]; next_before: number | null }>(`/lab/bundles${query(p)}`),
+        getBundle: (digest: string) =>
+            get<{ bundle: ImportedBundle; verifications: BundleVerification[] }>(`/lab/bundles/${seg(digest)}`),
+        reproduceBundle: (digest: string) =>
+            post<BundleVerification | { status: "measuring"; bundle_digest: string }>(
+                `/lab/bundles/${seg(digest)}/reproduce`,
+            ),
     };
 }
 

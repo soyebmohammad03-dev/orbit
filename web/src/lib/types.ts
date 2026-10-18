@@ -662,3 +662,217 @@ export interface ReliabilityResult {
     does_not_simulate: string[];
     limitations: string[];
 }
+
+// ---------------------------------------------------------------- Phase 9
+
+/** Labels of every reproduction attempt (`VerificationRecord.status` when `kind` is `reproduction`). */
+export type ReproductionStatus =
+    | "reproduced"
+    | "differs"
+    | "history_changed"
+    | "configuration_mismatch"
+    | "implementation_unavailable"
+    | "artifact_missing"
+    | "history_unavailable"
+    | "not_reproducible"
+    | "inconclusive"
+    | "unsupported";
+
+export interface Bound {
+    default: number;
+    min: number;
+    max: number;
+}
+
+export interface WorkloadInfo {
+    id: string;
+    version: number;
+    title: string;
+    iteration: string;
+    input_size_meaning: string;
+    input_unit: string;
+    input_size: Bound;
+}
+
+export interface RegressionPolicy {
+    threshold_percent: number;
+    alpha: number;
+}
+
+export interface WorkloadCatalog {
+    workloads: WorkloadInfo[];
+    warmup_iterations: Bound;
+    measured_iterations: Bound;
+    min_measurement_samples: number;
+    default_policy: RegressionPolicy;
+    build_profile: "debug" | "release";
+    measuring: boolean;
+}
+
+export interface PerformanceSpec {
+    workload: string;
+    workload_version?: number | null;
+    input_size?: number | null;
+    warmup_iterations?: number | null;
+    measured_iterations?: number | null;
+    seed?: number | null;
+}
+
+export interface Interval {
+    lower: number;
+    upper: number;
+    level: number;
+    coverage: number;
+    method: string;
+}
+
+export interface StatsSummary {
+    count: number;
+    mean: number;
+    median: number;
+    std_dev: number | null;
+    mad: number;
+    coefficient_of_variation: number | null;
+    min: number;
+    max: number;
+    percentiles: { p: number; value: number }[];
+    mean_ci: Interval | null;
+    median_ci: Interval | null;
+    notes: string[];
+}
+
+export interface PerformanceEnvironment {
+    os: string;
+    arch: string;
+    available_parallelism: number | null;
+    build_profile: string;
+    build: BuildInfo;
+}
+
+export interface PerformanceResult {
+    result_version: number;
+    workload: { id: string; version: number; title: string; iteration: string; input_unit: string };
+    configuration: PerformanceSpec;
+    configuration_digest: string;
+    environment: PerformanceEnvironment;
+    evidence_level: "smoke" | "measurement";
+    evidence_notes: string[];
+    unit: string;
+    warmup_samples_ns: number[];
+    samples_ns: number[];
+    summary: StatsSummary;
+    throughput_per_second_at_median: number | null;
+    limitations: string[];
+}
+
+export type ComparisonVerdict =
+    | "incompatible"
+    | "insufficient_samples"
+    | "within_threshold"
+    | "suspected_regression"
+    | "suspected_improvement"
+    | "regression"
+    | "improvement";
+
+export interface Comparison {
+    verdict: ComparisonVerdict;
+    compatibility: { incompatible: string[]; warnings: string[] };
+    baseline_median_ns: number | null;
+    candidate_median_ns: number | null;
+    absolute_change_ns: number | null;
+    relative_change: number | null;
+    median_intervals: [Interval | null, Interval | null] | null;
+    median_intervals_overlap: boolean | null;
+    test: { u: number; z: number; p_value: number; method: string } | null;
+    policy: RegressionPolicy;
+    explanation: string;
+}
+
+export interface ComparedExperiment {
+    experiment_id: string;
+    created_at: string;
+    configuration_digest: string;
+    evidence_level: string;
+    samples: number;
+    build: BuildInfo;
+    environment: PerformanceEnvironment;
+}
+
+export type CompareResponse =
+    | { status: "no_baseline"; reason: string; baseline: null; comparisons: []; policy: RegressionPolicy }
+    | {
+          status: "compared";
+          baseline_selection: "given" | "newest_compatible_before_candidate";
+          baseline: ComparedExperiment;
+          comparisons: { candidate: ComparedExperiment; comparison: Comparison }[];
+          policy: RegressionPolicy;
+      };
+
+export interface BundleIssue {
+    code: string;
+    message: string;
+}
+
+export interface ValidationReport {
+    valid: boolean;
+    bundle_digest: string | null;
+    format_version: number | null;
+    experiment_id: string | null;
+    kind: string | null;
+    status: ExperimentStatus | null;
+    outcome: string | null;
+    errors: BundleIssue[];
+    passed: string[];
+    integrity: "verified" | "failed";
+    scientific_correctness: "not_verified";
+    history: "included_and_verified" | "not_included" | "invalid";
+    independently_replayable: boolean;
+    replayability: string;
+    limitations: string[];
+}
+
+export interface ImportedBundleSummary {
+    bundle_digest: string;
+    experiment_id: string;
+    kind: string;
+    status: string;
+    outcome: string | null;
+    imported_at: string;
+    sequence: number;
+}
+
+export interface ImportedBundle extends ImportedBundleSummary {
+    format_version: number;
+    document: {
+        manifest: {
+            experiment_id: string;
+            kind: string;
+            exporter: BuildInfo;
+            document_digest: string;
+            entries: { name: string; media_type: string; size: number; sha256: string }[];
+        };
+        document: {
+            experiment: ExperimentRecord;
+            verifications: VerificationRecord[];
+            history: { included: boolean; entry: string | null; events: number | null; reason: string | null };
+            provenance: JsonObject;
+            limitations: string[];
+        };
+    };
+    validation: ValidationReport;
+}
+
+export interface BundleVerification {
+    id: string;
+    bundle_digest: string;
+    kind: "reproduction";
+    status: ReproductionStatus;
+    detail: Json;
+    verified_at: string;
+}
+
+export interface ImportOutcome {
+    bundle: ImportedBundle;
+    newly_imported: boolean;
+    local_experiment: { exists: boolean; same_spec_digest?: boolean; same_result_digest?: boolean };
+}
