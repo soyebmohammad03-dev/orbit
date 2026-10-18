@@ -71,7 +71,7 @@ export function Badge({ tone = "neutral", children, title }: { tone?: Tone; chil
         <span
             title={title}
             className={cx(
-                "inline-flex items-center gap-1 whitespace-nowrap rounded border px-1.5 py-0.5 text-[11px] font-medium leading-none",
+                "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium leading-tight",
                 toneClasses[tone],
             )}
         >

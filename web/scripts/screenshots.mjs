@@ -59,7 +59,11 @@ await capture("integrity", "/integrity?stream=order-1042", {
 });
 await capture("differential-replay", `/experiments?experiment=${diverged.id}`, {
     height: 1400,
-    prepare: (p) => p.getByText(/First divergence/).first().waitFor(),
+    prepare: (p) =>
+        p
+            .getByText(/First divergence/)
+            .first()
+            .waitFor(),
 });
 await capture("reliability", `/experiments?experiment=${reliability.id}`, {
     height: 1200,
@@ -81,7 +85,11 @@ await capture("evidence", `/evidence?bundle=${bundle.bundle_digest}`, {
 await capture("mobile-experiments", `/experiments?experiment=${diverged.id}`, {
     width: 390,
     height: 844,
-    prepare: (p) => p.getByText(/First divergence/).first().waitFor(),
+    prepare: (p) =>
+        p
+            .getByText(/First divergence/)
+            .first()
+            .waitFor(),
 });
 await browser.close();
 
