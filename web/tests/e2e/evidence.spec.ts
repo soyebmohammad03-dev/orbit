@@ -29,7 +29,8 @@ test("measure, compare and inspect a performance workload", async ({ page }) => 
     const comparisons = page.getByRole("list", { name: "Comparisons" });
     // Four samples are too few for the significance test: never a supported finding.
     await expect(comparisons).toBeVisible();
-    await expect(comparisons).not.toContainText("statistically supported)");
+    // ("Suspected regression (not statistically supported)" is allowed: machine noise.)
+    await expect(comparisons).not.toContainText(/(Regression|Improvement) \(statistically supported\)/);
     await expect(comparisons).toContainText(/Within threshold|Suspected/);
 
     await table.getByRole("link").first().click();
