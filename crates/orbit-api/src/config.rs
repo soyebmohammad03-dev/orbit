@@ -40,6 +40,10 @@ pub struct ApiConfig {
     /// Lab directory (`lab.db` and artifacts), or `None` to disable the lab
     /// endpoints.
     pub lab_dir: Option<PathBuf>,
+    /// The separately built `orbit-reliability` executable that may be
+    /// launched for reliability runs (absolute path), or `None`: launching
+    /// is disabled, which is the default. Its deadline per run.
+    pub reliability_runner: Option<(PathBuf, Duration)>,
 }
 
 /// Invalid API configuration.
@@ -90,6 +94,8 @@ impl ApiConfig {
     /// | `ORBIT_API_ALLOWED_HOSTS` | none (only `localhost`, `127.0.0.1`, `[::1]` are accepted in `Host`) |
     /// | `ORBIT_API_REQUEST_TIMEOUT_SECS` | `30` (1–600) |
     /// | `ORBIT_LAB_DIR` | `data/lab` (empty disables the lab endpoints) |
+    /// | `ORBIT_RELIABILITY_RUNNER` | unset: reliability runs cannot be launched. An absolute path to the separately built `orbit-reliability` tool enables `POST /lab/reliability/runs` |
+    /// | `ORBIT_RELIABILITY_TIMEOUT_SECS` | `900` (1–3600), the deadline of one launched run |
     ///
     /// plus every store variable understood by [`StoreConfig::from_lookup`].
     ///
@@ -163,6 +169,37 @@ impl ApiConfig {
             Some(dir) => Some(PathBuf::from(dir)),
             None => Some(PathBuf::from(DEFAULT_LAB_DIR)),
         };
+        let reliability_runner = match lookup("ORBIT_RELIABILITY_RUNNER") {
+            Some(path) if !path.trim().is_empty() => {
+                let path = PathBuf::from(path.trim());
+                if !path.is_absolute() {
+                    return Err(ApiConfigError::Invalid {
+                        name: "ORBIT_RELIABILITY_RUNNER",
+                        value: path.display().to_string(),
+                        reason: "expected an absolute path to the orbit-reliability executable"
+                            .to_owned(),
+                    });
+                }
+                let max = orbit_lab::reliability::launcher::MAX_TIMEOUT.as_secs();
+                let timeout = match lookup("ORBIT_RELIABILITY_TIMEOUT_SECS") {
+                    None => orbit_lab::reliability::launcher::DEFAULT_TIMEOUT,
+                    Some(value) => Duration::from_secs(
+                        value
+                            .trim()
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|s| (1..=max).contains(s))
+                            .ok_or_else(|| ApiConfigError::Invalid {
+                                name: "ORBIT_RELIABILITY_TIMEOUT_SECS",
+                                value: value.clone(),
+                                reason: format!("expected whole seconds between 1 and {max}"),
+                            })?,
+                    ),
+                };
+                Some((path, timeout))
+            }
+            _ => None,
+        };
         Ok(Self {
             addr,
             store,
@@ -171,6 +208,7 @@ impl ApiConfig {
             allowed_hosts,
             request_timeout,
             lab_dir,
+            reliability_runner,
         })
     }
 }
@@ -275,5 +313,38 @@ mod tests {
             ApiConfig::from_lookup(lookup(&[("ORBIT_DURABILITY", "maybe")])),
             Err(ApiConfigError::Store(_))
         ));
+    }
+
+    #[test]
+    fn the_reliability_runner_is_disabled_by_default_and_needs_an_absolute_path() {
+        let config = ApiConfig::from_lookup(lookup(&[])).unwrap();
+        assert!(config.reliability_runner.is_none());
+        let config = ApiConfig::from_lookup(lookup(&[("ORBIT_RELIABILITY_RUNNER", " ")])).unwrap();
+        assert!(config.reliability_runner.is_none());
+        assert!(
+            ApiConfig::from_lookup(lookup(&[("ORBIT_RELIABILITY_RUNNER", "orbit-reliability")]))
+                .is_err()
+        );
+        let config = ApiConfig::from_lookup(lookup(&[
+            ("ORBIT_RELIABILITY_RUNNER", "/opt/orbit/orbit-reliability"),
+            ("ORBIT_RELIABILITY_TIMEOUT_SECS", "60"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.reliability_runner,
+            Some((
+                PathBuf::from("/opt/orbit/orbit-reliability"),
+                Duration::from_secs(60)
+            ))
+        );
+        for bad in ["0", "3601", "x"] {
+            assert!(
+                ApiConfig::from_lookup(lookup(&[
+                    ("ORBIT_RELIABILITY_RUNNER", "/opt/orbit/orbit-reliability"),
+                    ("ORBIT_RELIABILITY_TIMEOUT_SECS", bad),
+                ]))
+                .is_err()
+            );
+        }
     }
 }

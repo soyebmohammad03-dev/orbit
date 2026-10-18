@@ -39,6 +39,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await??;
         state = state.with_lab(lab);
+        if let Some((runner, timeout)) = config.reliability_runner.clone() {
+            let launcher = orbit_lab::reliability::launcher::Launcher::new(&runner, timeout)?;
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "reliability runs can be launched through the API (ORBIT_RELIABILITY_RUNNER is set); \
+                 they run in the separate orbit-reliability process"
+            );
+            state = state.with_reliability_launcher(launcher);
+        }
+    } else if config.reliability_runner.is_some() {
+        tracing::warn!("ORBIT_RELIABILITY_RUNNER is ignored because the lab is disabled");
     }
     let app = router(state, &config.cors_origins);
 

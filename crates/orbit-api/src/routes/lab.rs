@@ -220,8 +220,9 @@ pub async fn create_experiment(
     if body.kind == orbit_lab::reliability::RELIABILITY {
         return Err(ApiError::bad_request(
             "unsupported_experiment_kind",
-            "reliability experiments inject faults and kill processes, so this API cannot run them; \
-             use the orbit-reliability tool (see docs/RELIABILITY.md). Their results are listed here.",
+            "reliability experiments inject faults and kill processes, so this API never runs them itself; \
+             launch one with POST /api/v1/lab/reliability/runs (needs a configured runner) or the \
+             orbit-reliability tool (see docs/RELIABILITY.md)",
         ));
     }
     if body.kind != orbit_lab::spec::DIFFERENTIAL_REPLAY {
@@ -367,18 +368,86 @@ pub async fn get_trace(
     .await
 }
 
-/// The supported reliability scenarios (read-only). They can only be run
-/// with the `orbit-reliability` tool; their results appear as experiments.
+/// The supported reliability scenarios and whether this server can launch
+/// them. Launching needs the separately built `orbit-reliability` runner,
+/// configured with `ORBIT_RELIABILITY_RUNNER`; it is disabled by default.
 #[utoipa::path(get, path = "/api/v1/lab/reliability/scenarios", tag = "lab",
-    responses((status = 200, description = "Scenario catalog", body = Object), (status = 503, body = ErrorResponse)))]
+    responses((status = 200, description = "Scenario catalog and runner status", body = Object), (status = 503, body = ErrorResponse)))]
 pub async fn list_reliability_scenarios(
     State(state): State<AppState>,
 ) -> Result<ApiJson<Value>, ApiError> {
     lab(&state)?;
+    let runner = state.reliability.as_ref().map_or_else(
+        || {
+            serde_json::json!({
+                "enabled": false,
+                "reason": "launching is disabled on this server; set ORBIT_RELIABILITY_RUNNER to the absolute path of a separately built orbit-reliability executable to enable it (see docs/RELIABILITY.md)",
+            })
+        },
+        |l| {
+            serde_json::json!({
+                "enabled": true,
+                "timeout_secs": l.timeout().as_secs(),
+                "busy": l.busy(),
+            })
+        },
+    );
     Ok(ApiJson(serde_json::json!({
         "scenarios": orbit_lab::reliability::SCENARIOS,
-        "execution": "orbit-reliability tool only (cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run <scenario>)",
+        "runner": runner,
+        "execution": "cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run <scenario>",
     })))
+}
+
+/// Body of `POST /api/v1/lab/reliability/runs`: a reliability spec.
+pub type LaunchRequest = Value;
+
+/// Launches a catalog scenario in the separately configured runner process.
+///
+/// The body is a reliability spec (`{scenario, scenario_version?,
+/// parameters?}`; unknown fields are rejected, parameters are bounded). It
+/// is recorded as a `created` experiment and returned (202); the runner
+/// (`orbit-reliability --lab <lab> run-id <id>`, no client text on its
+/// command line) executes it. Poll the experiment. One run at a time;
+/// runs past the deadline are stopped and recorded as infrastructure
+/// failures. Nothing here injects faults: only the runner can.
+#[utoipa::path(post, path = "/api/v1/lab/reliability/runs", tag = "lab",
+    request_body(content = Object, description = "A reliability spec"),
+    responses((status = 202, description = "The recorded experiment (status created)", body = Object),
+              (status = 400, body = ErrorResponse),
+              (status = 409, description = "A reliability run is already in progress", body = ErrorResponse),
+              (status = 503, description = "Launching is disabled on this server", body = ErrorResponse)))]
+pub async fn launch_reliability(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<LaunchRequest>,
+) -> Result<(StatusCode, ApiJson<Value>), ApiError> {
+    let lab = lab(&state)?;
+    let launcher = state.reliability.clone().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "reliability_runner_disabled",
+        message: "reliability runs cannot be launched on this server: ORBIT_RELIABILITY_RUNNER is not set (see docs/RELIABILITY.md)".to_owned(),
+        class: None,
+        details: Value::Null,
+    })?;
+    let spec = orbit_lab::reliability::ReliabilitySpec::from_json(body)?;
+    let record = tokio::task::spawn_blocking(move || {
+        launcher.launch(lab, &spec, |report| {
+            tracing::info!(id = %report.id, status = %report.status, timed_out = report.timed_out, finalized = ?report.finalized, "reliability run ended");
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("lab task failed: {e}")))?
+    .map_err(|e| match e {
+        orbit_lab::reliability::launcher::LaunchError::Busy => ApiError {
+            status: StatusCode::CONFLICT,
+            code: "reliability_run_in_progress",
+            message: e.to_string(),
+            class: Some(orbit_core::ErrorClass::Retryable),
+            details: Value::Null,
+        },
+        orbit_lab::reliability::launcher::LaunchError::Lab(e) => e.into(),
+    })?;
+    Ok((StatusCode::ACCEPTED, ApiJson(json(&record)?)))
 }
 
 /// The performance workloads, their bounds and the default regression policy.

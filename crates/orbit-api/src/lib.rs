@@ -54,6 +54,9 @@ pub struct AppState {
     /// Set while a performance measurement runs in the background; at most
     /// one runs at a time (see `routes::lab`).
     pub measuring: Arc<std::sync::atomic::AtomicBool>,
+    /// Launches reliability runs in the separately configured runner
+    /// process, if enabled (see [`ApiConfig::reliability_runner`]).
+    pub reliability: Option<Arc<orbit_lab::reliability::launcher::Launcher>>,
 }
 
 impl AppState {
@@ -76,7 +79,18 @@ impl AppState {
             request_timeout: config::DEFAULT_REQUEST_TIMEOUT,
             lab: None,
             measuring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reliability: None,
         }
+    }
+
+    /// Enables launching reliability runs with `launcher`.
+    #[must_use]
+    pub fn with_reliability_launcher(
+        mut self,
+        launcher: orbit_lab::reliability::launcher::Launcher,
+    ) -> Self {
+        self.reliability = Some(Arc::new(launcher));
+        self
     }
 
     /// Enables the lab endpoints with `lab`.
@@ -265,6 +279,7 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
             "/lab/reliability/scenarios",
             get(lab::list_reliability_scenarios),
         )
+        .route("/lab/reliability/runs", post(lab::launch_reliability))
         .route(
             "/lab/performance/workloads",
             get(lab::list_performance_workloads),
