@@ -87,3 +87,32 @@ export function outcomeTone(status: string | null | undefined): Tone {
             return "neutral";
     }
 }
+
+/** Labels of differential-replay outcomes (orbit-lab). */
+export const LAB_OUTCOME_LABELS: Record<string, string> = {
+    equivalent: "Equivalent",
+    reconverged: "Reconverged",
+    diverged: "Diverged",
+    implementation_failed: "Implementation failed",
+    nondeterministic: "Nondeterministic",
+};
+
+/**
+ * Tone of a differential-replay outcome. A difference between two
+ * implementations is a finding, not necessarily an error, so it is shown
+ * as a warning; only results that cannot be trusted are shown as failures.
+ */
+export function labOutcomeTone(outcome: string | null | undefined): Tone {
+    switch (outcome) {
+        case "equivalent":
+            return "ok";
+        case "reconverged":
+        case "diverged":
+        case "implementation_failed":
+            return "warn";
+        case "nondeterministic":
+            return "fail";
+        default:
+            return "neutral";
+    }
+}

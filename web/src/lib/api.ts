@@ -1,6 +1,13 @@
 import { API_BASE_URL } from "./config";
 import type {
     AppendEventRequest,
+    ArtifactVerificationResponse,
+    DifferentialSpec,
+    ExperimentDetail,
+    ExperimentRecord,
+    ExperimentSummary,
+    ImplementationDescriptor,
+    VerificationRecord,
     BenchmarksResponse,
     CapabilitiesResponse,
     Checkpoint,
@@ -168,6 +175,15 @@ export function createClient(options: ClientOptions = {}) {
             id: string,
             body: { projection?: string; to?: number; snapshot_policy?: SnapshotPolicyParam },
         ) => post<ExperimentReport>(`/streams/${seg(id)}/experiments`, body),
+
+        labImplementations: () => get<{ implementations: ImplementationDescriptor[] }>("/lab/implementations"),
+        listLabExperiments: (p: { before?: string; limit?: number } = {}) =>
+            get<{ experiments: ExperimentSummary[]; next_before: string | null }>(`/lab/experiments${query(p)}`),
+        createDifferential: (spec: DifferentialSpec) =>
+            post<ExperimentRecord>("/lab/experiments", { kind: "differential_replay", spec }),
+        getLabExperiment: (id: string) => get<ExperimentDetail>(`/lab/experiments/${seg(id)}`),
+        verifyLabExperiment: (id: string) => post<ArtifactVerificationResponse>(`/lab/experiments/${seg(id)}/verify`),
+        reproduceLabExperiment: (id: string) => post<VerificationRecord>(`/lab/experiments/${seg(id)}/reproduce`),
     };
 }
 

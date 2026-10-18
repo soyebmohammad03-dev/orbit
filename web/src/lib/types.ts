@@ -356,3 +356,162 @@ export interface BenchmarksResponse {
     results: BenchmarkResult[];
     note: string;
 }
+
+// ---- Lab (orbit-lab): experiment registry and differential replay ----
+
+export type LabSide = "left" | "right";
+export type ExperimentStatus = "created" | "running" | "completed" | "failed";
+export type LabOutcome = "equivalent" | "reconverged" | "diverged" | "implementation_failed" | "nondeterministic";
+export type Reproducibility = "reproducible" | "unverified" | "not_reproducible";
+
+export interface ImplementationDescriptor {
+    descriptor_version: number;
+    id: string;
+    name: string;
+    projection: { id: string; version: number };
+    adapter: string;
+    implementation_type: string;
+    config: Json;
+    config_digest: string;
+    determinism: "pure" | "uncontrolled";
+    fingerprint: string;
+}
+
+export interface DifferentialSpec {
+    stream: string;
+    left: string;
+    right: string;
+    from?: number;
+    to?: number | null;
+    reference?: LabSide | null;
+    determinism_check?: boolean;
+}
+
+export interface ExperimentSummary {
+    id: string;
+    kind: string;
+    status: ExperimentStatus;
+    created_at: string;
+    stream: string;
+    left: string;
+    right: string;
+    outcome: LabOutcome | null;
+    reproducibility: Reproducibility | null;
+}
+
+export interface InputRange {
+    stream: string;
+    from: number;
+    to: number;
+    from_event_digest: string;
+    to_event_digest: string;
+    history_fingerprint: string;
+}
+
+export interface StateSummary {
+    digest: string;
+    canonical_bytes: number;
+}
+
+export interface LabEventRef {
+    sequence: number;
+    event_id: string;
+    event_type: string;
+    schema_version: number;
+}
+
+export interface LabComparison {
+    boundary: number;
+    event: LabEventRef | null;
+    left: StateSummary;
+    right: StateSummary;
+    equal: boolean;
+    changes: Change[];
+    changes_total: number;
+}
+
+export interface LabSideFailure {
+    side: LabSide;
+    implementation: string;
+    boundary: number;
+    event: LabEventRef | null;
+    failure: { kind: string; message?: string; error?: { kind: string; message: string } };
+}
+
+export interface DifferentialResult {
+    outcome: LabOutcome;
+    reference: LabSide | null;
+    left: { implementation: string; fingerprint: string };
+    right: { implementation: string; fingerprint: string };
+    input: InputRange;
+    events_processed: number;
+    events_fed_digest: string;
+    boundaries_compared: number;
+    boundaries_differing: number;
+    first_divergence: (LabComparison & { boundaries_matched_before: number }) | null;
+    divergent_segments: { first: number; last: number }[];
+    divergent_segments_total: number;
+    final_comparison: LabComparison | null;
+    failures: LabSideFailure[];
+    determinism: {
+        checked: boolean;
+        consistent: boolean | null;
+        inconsistency: { side: LabSide; boundary: number } | null;
+        declared_uncontrolled: LabSide[];
+    };
+    reproducibility: { status: Reproducibility; reasons: string[] };
+}
+
+export interface LabArtifact {
+    role: string;
+    digest: string;
+    media_type: string;
+    size: number;
+}
+
+export interface ExperimentRecord {
+    id: string;
+    kind: string;
+    spec_version: number;
+    spec: DifferentialSpec;
+    spec_digest: string;
+    implementations: { side: LabSide; descriptor: ImplementationDescriptor }[];
+    build: { orbit_version: string; git_commit: string | null };
+    status: ExperimentStatus;
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+    elapsed_micros: number | null;
+    input: InputRange | null;
+    outcome: LabOutcome | null;
+    result: DifferentialResult | null;
+    result_digest: string | null;
+    reproducibility: Reproducibility | null;
+    failure: { kind: string; message: string; details: Json } | null;
+    artifacts: LabArtifact[];
+}
+
+export interface VerificationRecord {
+    id: string;
+    experiment_id: string;
+    kind: "artifacts" | "reproduction";
+    status: string;
+    detail: Json;
+    verified_at: string;
+}
+
+export interface ExperimentDetail {
+    experiment: ExperimentRecord;
+    verifications: VerificationRecord[];
+}
+
+export interface ArtifactVerificationResponse {
+    report: {
+        status: "intact" | "damaged";
+        spec_digest_ok: boolean;
+        result_digest_ok: boolean | null;
+        traces_consistent: boolean | null;
+        artifacts: (LabArtifact & { state: "intact" | "missing" | "corrupted" })[];
+    };
+    verification: VerificationRecord;
+}

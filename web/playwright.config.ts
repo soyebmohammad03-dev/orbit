@@ -37,6 +37,7 @@ export default defineConfig({
             reuseExistingServer: false,
             env: {
                 ORBIT_DB_PATH: join(dataDir, "orbit.db"),
+                ORBIT_LAB_DIR: join(dataDir, "lab"),
                 ORBIT_API_ADDR: `127.0.0.1:${API_PORT}`,
                 ORBIT_API_CORS_ORIGINS: WEB_URL,
                 ORBIT_BENCHMARK_DIR: "",
