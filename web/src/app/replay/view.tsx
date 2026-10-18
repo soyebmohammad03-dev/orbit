@@ -21,6 +21,7 @@ import {
     Select,
     Table,
     Td,
+    TextLink,
     Th,
 } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -50,7 +51,14 @@ export function ReplayView() {
         <>
             <PageHeader
                 title="Replay Lab"
-                description="Recorded, self-contained replay runs re-executed with the current projection code. Every execution is persisted and classified; divergence names the first event after which the state digest differed."
+                description={
+                    <>
+                        Recorded, self-contained replay runs re-executed with the current projection code. Every
+                        execution is persisted and classified; divergence names the first event after which the state
+                        digest differed. To compare two different implementations over the same history, with a full
+                        divergence timeline, use <TextLink href="/experiments">Experiments</TextLink>.
+                    </>
+                }
                 actions={<StreamPicker value={stream} onChange={(id) => setStream(id, ["run"])} />}
             />
             {!stream ? (

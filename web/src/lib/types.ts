@@ -418,6 +418,17 @@ export interface LabEventRef {
     event_id: string;
     event_type: string;
     schema_version: number;
+    /** Sprint 8 results only. */
+    digest?: string;
+    recorded_at?: string;
+    metadata_keys?: string[];
+}
+
+export interface ChangeSummary {
+    added: number;
+    removed: number;
+    modified: number;
+    type_changed: number;
 }
 
 export interface LabComparison {
@@ -428,6 +439,8 @@ export interface LabComparison {
     equal: boolean;
     changes: Change[];
     changes_total: number;
+    /** Sprint 8 results only. */
+    change_summary?: ChangeSummary;
 }
 
 export interface LabSideFailure {
@@ -438,9 +451,46 @@ export interface LabSideFailure {
     failure: { kind: string; message?: string; error?: { kind: string; message: string } };
 }
 
+export interface DivergenceInterval {
+    index: number;
+    first: number;
+    last: number;
+    boundaries: number;
+    end: "converged" | "open_at_end" | "stopped_by_failure";
+    converged_at: number | null;
+    convergence_event: LabEventRef | null;
+    entry: LabComparison | null;
+    exit: LabComparison | null;
+}
+
+export interface Timeline {
+    first_boundary: number;
+    last_boundary: number | null;
+    intervals: DivergenceInterval[];
+    intervals_total: number;
+    intervals_truncated: boolean;
+    convergences: number;
+    final_equal: boolean | null;
+}
+
 export interface DifferentialResult {
+    /** Absent in Sprint 7 results (version 1). */
+    result_version?: number;
+    semantics?: {
+        version: number;
+        boundary: string;
+        state_comparison: string;
+        structural_diff: string;
+        max_events: number;
+    };
     outcome: LabOutcome;
     reference: LabSide | null;
+    perspective?: {
+        reference: LabSide | null;
+        expected: LabSide | null;
+        observed: LabSide | null;
+        changes_orientation: string;
+    };
     left: { implementation: string; fingerprint: string };
     right: { implementation: string; fingerprint: string };
     input: InputRange;
@@ -449,8 +499,11 @@ export interface DifferentialResult {
     boundaries_compared: number;
     boundaries_differing: number;
     first_divergence: (LabComparison & { boundaries_matched_before: number }) | null;
-    divergent_segments: { first: number; last: number }[];
-    divergent_segments_total: number;
+    /** Sprint 8 results. */
+    timeline?: Timeline;
+    /** Sprint 7 results. */
+    divergent_segments?: { first: number; last: number }[];
+    divergent_segments_total?: number;
     final_comparison: LabComparison | null;
     failures: LabSideFailure[];
     determinism: {
@@ -460,6 +513,35 @@ export interface DifferentialResult {
         declared_uncontrolled: LabSide[];
     };
     reproducibility: { status: Reproducibility; reasons: string[] };
+    diagnosis?: { evidence: string[]; not_established: string[] };
+}
+
+export interface IdentityAssessment {
+    sides: {
+        side: string;
+        implementation: string;
+        projection: { id: string; version: number } | null;
+        fingerprint: string | null;
+        config_digest: string | null;
+    }[];
+    build: BuildInfo;
+    completeness: "declared" | "source_revision" | "executable";
+    gaps: string[];
+}
+
+export interface BuildInfo {
+    orbit_version: string;
+    git_commit: string | null;
+    executable_digest?: string | null;
+}
+
+export interface TracePage {
+    experiment_id: string;
+    first_boundary: number;
+    last_boundary: number | null;
+    boundaries_total: number;
+    entries: { boundary: number; left: string; right: string; equal: boolean }[];
+    next_from: number | null;
 }
 
 export interface LabArtifact {
@@ -476,7 +558,7 @@ export interface ExperimentRecord {
     spec: DifferentialSpec;
     spec_digest: string;
     implementations: { side: LabSide; descriptor: ImplementationDescriptor }[];
-    build: { orbit_version: string; git_commit: string | null };
+    build: BuildInfo;
     status: ExperimentStatus;
     created_at: string;
     started_at: string | null;
@@ -489,6 +571,7 @@ export interface ExperimentRecord {
     reproducibility: Reproducibility | null;
     failure: { kind: string; message: string; details: Json } | null;
     artifacts: LabArtifact[];
+    identity: IdentityAssessment;
 }
 
 export interface VerificationRecord {

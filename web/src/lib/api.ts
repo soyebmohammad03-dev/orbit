@@ -33,6 +33,7 @@ import type {
     StoredEvent,
     StreamDetail,
     StreamPage,
+    TracePage,
 } from "./types";
 
 /** An error returned by the API (structured envelope) or a transport failure. */
@@ -184,6 +185,8 @@ export function createClient(options: ClientOptions = {}) {
         getLabExperiment: (id: string) => get<ExperimentDetail>(`/lab/experiments/${seg(id)}`),
         verifyLabExperiment: (id: string) => post<ArtifactVerificationResponse>(`/lab/experiments/${seg(id)}/verify`),
         reproduceLabExperiment: (id: string) => post<VerificationRecord>(`/lab/experiments/${seg(id)}/reproduce`),
+        getLabTrace: (id: string, p: { from?: number; limit?: number } = {}) =>
+            get<TracePage>(`/lab/experiments/${seg(id)}/trace${query(p)}`),
     };
 }
 

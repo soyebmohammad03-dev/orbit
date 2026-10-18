@@ -2,7 +2,16 @@
 
 import { type ReactNode, useState } from "react";
 
-import { DiffView } from "@/components/diff-view";
+import {
+    ComparisonView,
+    DiagnosisView,
+    DivergenceTimeline,
+    IdentityView,
+    IntervalList,
+    TraceWindow,
+    sideLabel,
+    timelineOf,
+} from "./diagnostics";
 import { StreamPicker, useQueryParam } from "@/components/stream-picker";
 import {
     Badge,
@@ -28,7 +37,6 @@ import type {
     ArtifactVerificationResponse,
     ExperimentRecord,
     ImplementationDescriptor,
-    LabComparison,
     LabSide,
     VerificationRecord,
 } from "@/lib/types";
@@ -282,53 +290,50 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
     );
 }
 
+const VERIFIED_OK = ["intact", "reproduced"];
+
 function VerificationList({ items }: { items: VerificationRecord[] }) {
     if (items.length === 0) return <p className="text-sm text-muted">Not verified yet.</p>;
     return (
-        <ul aria-label="Verification history" className="flex flex-col gap-1 text-sm">
-            {items.map((v) => (
-                <li key={v.id} className="flex flex-wrap items-center gap-2">
-                    <Badge tone={["intact", "reproduced"].includes(v.status) ? "ok" : "fail"}>{v.status}</Badge>
-                    <span className="text-muted">{v.kind}</span>
-                    <span className="text-xs text-faint">{formatTimestamp(v.verified_at)}</span>
-                </li>
-            ))}
+        <ul aria-label="Verification history" className="flex flex-col gap-2 text-sm">
+            {items.map((v) => {
+                const d = (v.detail ?? {}) as Record<string, unknown>;
+                const differences = Array.isArray(d.differences) ? (d.differences as string[]) : [];
+                const build = (d.build ?? null) as { same_executable?: boolean | null } | null;
+                return (
+                    <li key={v.id} className="flex flex-col gap-1">
+                        <span className="flex flex-wrap items-center gap-2">
+                            <Badge tone={VERIFIED_OK.includes(v.status) ? "ok" : "fail"}>
+                                {v.status.replaceAll("_", " ")}
+                            </Badge>
+                            <span className="text-muted">{v.kind}</span>
+                            <span className="text-xs text-faint">{formatTimestamp(v.verified_at)}</span>
+                        </span>
+                        {v.kind === "reproduction" ? (
+                            <span className="pl-1 text-xs text-muted">
+                                {typeof d.reason === "string" ? d.reason : null}
+                                {d.compared === "full_result"
+                                    ? "Compared the full result document and both traces."
+                                    : d.compared === "traces_and_summary"
+                                      ? "Compared both traces and the result summary (the original result has an older layout)."
+                                      : null}
+                                {differences.length > 0 ? ` Differs in: ${differences.join(", ")}.` : null}
+                                {typeof d.recorded_outcome === "string" && typeof d.reproduced_outcome === "string"
+                                    ? ` Original outcome ${d.recorded_outcome}, re-run ${d.reproduced_outcome}.`
+                                    : null}
+                                {build && build.same_executable !== undefined
+                                    ? build.same_executable === null
+                                        ? " Executable: not comparable (no digest recorded)."
+                                        : build.same_executable
+                                          ? " Same executable."
+                                          : " Different executable."
+                                    : null}
+                            </span>
+                        ) : null}
+                    </li>
+                );
+            })}
         </ul>
-    );
-}
-
-function sideName(side: LabSide, reference: LabSide | null): string {
-    if (!reference) return side;
-    return side === reference ? `${side} (expected)` : `${side} (observed)`;
-}
-
-function ComparisonView({ comparison, reference }: { comparison: LabComparison; reference: LabSide | null }) {
-    return (
-        <div className="flex flex-col gap-3">
-            <KeyValue
-                items={[
-                    ["Boundary", <Mono key="b">{comparison.boundary}</Mono>],
-                    [
-                        "Event",
-                        comparison.event ? (
-                            <Mono key="e">
-                                #{comparison.event.sequence} {comparison.event.event_type}
-                            </Mono>
-                        ) : (
-                            "initial state"
-                        ),
-                    ],
-                    [sideName("left", reference), <Digest key="l" value={comparison.left.digest} />],
-                    [sideName("right", reference), <Digest key="r" value={comparison.right.digest} />],
-                ]}
-            />
-            <DiffView changes={comparison.changes} />
-            {comparison.changes_total > comparison.changes.length ? (
-                <p className="text-xs text-muted">
-                    Showing {comparison.changes.length} of {comparison.changes_total} changes.
-                </p>
-            ) : null}
-        </div>
     );
 }
 
@@ -336,6 +341,9 @@ function ComparisonView({ comparison, reference }: { comparison: LabComparison; 
 export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
     const result = record.result;
     const reference = result?.reference ?? null;
+    const stream = record.input?.stream ?? record.spec.stream;
+    const [traceAt, setTraceAt] = useState<number | null>(null);
+    const timeline = result ? timelineOf(result) : null;
     return (
         <>
             <Card title="Experiment" actions={<LabOutcomeBadge record={record} />}>
@@ -346,9 +354,14 @@ export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
                         [
                             "Input",
                             record.input ? (
-                                <Mono key="in">
-                                    {record.input.stream}, boundaries {record.input.from}–{record.input.to}
-                                </Mono>
+                                <span key="in" className="flex flex-col">
+                                    <Mono>
+                                        {record.input.stream}, boundaries {record.input.from}–{record.input.to}
+                                    </Mono>
+                                    <span className="text-xs text-faint">
+                                        history fingerprint <Digest value={record.input.history_fingerprint} />
+                                    </span>
+                                </span>
                             ) : (
                                 <Mono key="in">{record.spec.stream}</Mono>
                             ),
@@ -356,7 +369,7 @@ export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
                         ...record.implementations.map(
                             (i) =>
                                 [
-                                    sideName(i.side, reference),
+                                    sideLabel(i.side, reference),
                                     <span key={i.side} className="flex flex-wrap items-center gap-2">
                                         <Mono>{implementationLabel(i.descriptor)}</Mono>
                                         <Digest value={i.descriptor.fingerprint} />
@@ -365,7 +378,7 @@ export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
                         ),
                         [
                             "Reproducibility",
-                            <span key="rep" className="flex flex-col gap-1">
+                            <span key="rep" className="flex flex-col items-start gap-1">
                                 <ReproducibilityBadge value={record.reproducibility} />
                                 {result?.reproducibility.reasons.map((r) => (
                                     <span key={r} className="text-xs text-muted">
@@ -391,16 +404,17 @@ export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
                     </div>
                 ) : null}
             </Card>
-            {result ? (
+            <Card title="Implementation identity">
+                <IdentityView identity={record.identity} />
+            </Card>
+            {result && timeline ? (
                 <Card title="Diagnosis">
-                    <div className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-5">
                         <p className="text-sm text-muted">
                             {result.events_processed} events fed to both implementations · {result.boundaries_compared}{" "}
                             boundaries compared · {result.boundaries_differing} differing
-                            {result.divergent_segments_total > 0
-                                ? ` in ${result.divergent_segments_total} segment${result.divergent_segments_total === 1 ? "" : "s"}`
-                                : ""}
                         </p>
+                        {result.diagnosis ? <DiagnosisView diagnosis={result.diagnosis} /> : null}
                         {result.failures.map((f) => (
                             <div
                                 key={f.side}
@@ -413,21 +427,67 @@ export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
                                 <p className="text-text">{f.failure.error?.message ?? f.failure.message ?? ""}</p>
                             </div>
                         ))}
+                        <div>
+                            <h3 className="mb-2 text-sm font-medium text-text">Divergence timeline</h3>
+                            {timeline.legacy ? (
+                                <p className="mb-2 text-xs text-muted">
+                                    Recorded before Sprint 8: intervals are known, but how each one ended was not
+                                    recorded.
+                                </p>
+                            ) : null}
+                            <DivergenceTimeline timeline={timeline.timeline} onSelect={setTraceAt} />
+                        </div>
                         {result.first_divergence ? (
                             <div>
-                                <h3 className="mb-2 text-sm font-medium text-text">
-                                    First divergence (after {result.first_divergence.boundaries_matched_before} matching
-                                    boundaries)
-                                </h3>
-                                <ComparisonView comparison={result.first_divergence} reference={reference} />
+                                <div className="mb-2 flex flex-wrap items-center gap-2">
+                                    <h3 className="text-sm font-medium text-text">
+                                        First divergence (after {result.first_divergence.boundaries_matched_before}{" "}
+                                        matching boundaries)
+                                    </h3>
+                                    {record.status === "completed" ? (
+                                        <Button
+                                            type="button"
+                                            onClick={() => setTraceAt(result.first_divergence!.boundary)}
+                                        >
+                                            Show trace around it
+                                        </Button>
+                                    ) : null}
+                                </div>
+                                <ComparisonView
+                                    comparison={result.first_divergence}
+                                    reference={reference}
+                                    stream={stream}
+                                />
                             </div>
                         ) : (
                             <p className="text-sm text-ok">The states were equal at every compared boundary.</p>
                         )}
+                        {traceAt !== null ? (
+                            <div>
+                                <h3 className="mb-2 text-sm font-medium text-text">Trace around boundary {traceAt}</h3>
+                                <TraceWindow experimentId={record.id} around={traceAt} stream={stream} />
+                            </div>
+                        ) : null}
+                        {timeline.timeline.intervals.length > 0 ? (
+                            <div>
+                                <h3 className="mb-2 text-sm font-medium text-text">Intervals</h3>
+                                <IntervalList
+                                    timeline={timeline.timeline}
+                                    reference={reference}
+                                    stream={stream}
+                                    legacy={timeline.legacy}
+                                    onSelect={setTraceAt}
+                                />
+                            </div>
+                        ) : null}
                         {result.final_comparison && result.first_divergence ? (
                             <div>
                                 <h3 className="mb-2 text-sm font-medium text-text">Final states</h3>
-                                <ComparisonView comparison={result.final_comparison} reference={reference} />
+                                <ComparisonView
+                                    comparison={result.final_comparison}
+                                    reference={reference}
+                                    stream={stream}
+                                />
                             </div>
                         ) : null}
                         {record.artifacts.length > 0 ? (
