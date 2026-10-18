@@ -106,6 +106,7 @@ pub struct Lab {
     registry: Registry,
     artifacts: ArtifactStore,
     catalog: Catalog,
+    dir: PathBuf,
     locks: PathBuf,
 }
 
@@ -120,18 +121,7 @@ impl Lab {
     /// # Errors
     /// I/O or registry errors.
     pub fn open(dir: &Path, catalog: Catalog) -> Result<Self> {
-        fs::create_dir_all(dir)?;
-        let locks = dir.join("locks");
-        fs::create_dir_all(&locks)?;
-        let lab = Self {
-            registry: Registry::open(&dir.join(REGISTRY_FILE))?,
-            artifacts: ArtifactStore::open(&dir.join("artifacts"))?,
-            catalog,
-            locks,
-        };
-        // Hash the executable in the background, so the first experiment
-        // usually does not wait for it (`BuildInfo::current` reuses it).
-        std::thread::spawn(crate::identity::executable_digest);
+        let lab = Self::open_without_recovery(dir, catalog)?;
         let recovered = lab.recover_interrupted()?;
         if !recovered.is_empty() {
             tracing::warn!(
@@ -139,7 +129,63 @@ impl Lab {
                 "marked interrupted experiments as failed"
             );
         }
+        let removed = lab.artifacts.remove_stale_temporaries()?;
+        if removed > 0 {
+            tracing::warn!(
+                removed,
+                "removed temporary files of interrupted artifact writes"
+            );
+        }
         Ok(lab)
+    }
+
+    /// Opens the lab without recovering interrupted experiments or removing
+    /// stale temporary files. For tools and tests that need to observe or
+    /// trigger recovery themselves; ordinary callers use [`open`](Self::open).
+    ///
+    /// # Errors
+    /// I/O or registry errors.
+    pub fn open_without_recovery(dir: &Path, catalog: Catalog) -> Result<Self> {
+        fs::create_dir_all(dir)?;
+        let locks = dir.join("locks");
+        fs::create_dir_all(&locks)?;
+        // Hash the executable in the background, so the first experiment
+        // usually does not wait for it (`BuildInfo::current` reuses it).
+        std::thread::spawn(crate::identity::executable_digest);
+        Ok(Self {
+            registry: Registry::open(&dir.join(REGISTRY_FILE))?,
+            artifacts: ArtifactStore::open(&dir.join("artifacts"))?,
+            catalog,
+            dir: dir.to_path_buf(),
+            locks,
+        })
+    }
+
+    /// The lab directory.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Installs (or with `None` removes) the lab's fault hook. See [`crate::fault`].
+    #[cfg(feature = "reliability")]
+    pub fn set_fault_hook(&self, hook: Option<crate::fault::LabFaultHook>) {
+        *self
+            .artifacts
+            .hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(feature = "reliability")]
+    fn fault(&self, point: crate::fault::LabFaultPoint) -> Result<()> {
+        crate::fault::check(&self.artifacts.hook, point)
+    }
+
+    #[cfg(not(feature = "reliability"))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn fault(&self, _point: crate::fault::LabFaultPoint) -> Result<()> {
+        Ok(())
     }
 
     /// The implementation catalog.
@@ -226,11 +272,11 @@ impl Lab {
             { "side": Side::Left, "descriptor": left.descriptor() },
             { "side": Side::Right, "descriptor": right.descriptor() },
         ]);
-        let id = self.registry.create(&NewExperiment {
-            spec: spec.clone(),
+        let id = self.registry.create(&NewExperiment::differential(
+            spec,
             implementations,
-            build: BuildInfo::current(),
-        })?;
+            BuildInfo::current(),
+        )?)?;
         self.registry.get(id)
     }
 
@@ -259,6 +305,29 @@ impl Lab {
     /// errors.
     pub fn run(&self, id: ExperimentId, store: &EventStore) -> Result<ExperimentRecord> {
         let record = self.registry.get(id)?;
+        if record.kind != crate::spec::DIFFERENTIAL_REPLAY {
+            return Err(LabError::InvalidState {
+                id,
+                reason: format!("{} experiments are not run by Lab::run", record.kind),
+            });
+        }
+        self.run_locked(id, |record| self.execute(record, store))
+    }
+
+    /// Runs a `created` experiment of any kind: takes its lock, `created` →
+    /// `running`, calls `execute`, then records `completed` or `failed`, and
+    /// releases the lock. The lab fault points `run_after_start` and
+    /// `run_before_complete` are consulted here.
+    ///
+    /// # Errors
+    /// [`LabError::InvalidTransition`] if it is not `created`, or registry
+    /// errors.
+    pub fn run_locked(
+        &self,
+        id: ExperimentId,
+        execute: impl FnOnce(&ExperimentRecord) -> std::result::Result<Completion, RunFailure>,
+    ) -> Result<ExperimentRecord> {
+        let record = self.registry.get(id)?;
         if record.status != Status::Created {
             return Err(LabError::InvalidTransition {
                 id,
@@ -279,7 +348,17 @@ impl Lab {
         }
         self.registry.start(id)?;
         let started = Instant::now();
-        let outcome = self.execute(&record, store);
+        let outcome = self
+            .fault(crate::fault::LabFaultPoint::RunAfterStart)
+            .map_err(|e| RunFailure::from(Failure::new(FailureKind::Internal, e.to_string())))
+            .and_then(|()| execute(&record))
+            .and_then(|completion| {
+                self.fault(crate::fault::LabFaultPoint::RunBeforeComplete)
+                    .map(|()| completion)
+                    .map_err(|e| {
+                        RunFailure::from(Failure::new(FailureKind::Internal, e.to_string()))
+                    })
+            });
         let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let stored = match outcome {
             Ok(completion) => {
@@ -295,7 +374,7 @@ impl Lab {
                             format!("the result could not be recorded: {e}"),
                         );
                         self.registry
-                            .fail(id, &failure, Some(&completion.input), Some(elapsed))
+                            .fail(id, &failure, completion.input.as_ref(), Some(elapsed))
                             .and(Err(e))
                     }
                 }
@@ -348,6 +427,8 @@ impl Lab {
             failure: Failure::new(FailureKind::Internal, e.to_string()),
             input: Some(Box::new(input.clone())),
         };
+        self.fault(crate::fault::LabFaultPoint::RunAfterExecute)
+            .map_err(fail_internal)?;
         let mut artifacts = Vec::new();
         for (role, media_type, bytes) in &run.artifacts {
             let digest = self.artifacts.put(bytes).map_err(fail_internal)?;
@@ -360,7 +441,7 @@ impl Lab {
         }
         let result = json_of(&run.result).map_err(fail_internal)?;
         Ok(Completion {
-            input,
+            input: Some(input),
             outcome: run.result.outcome.label().to_owned(),
             result_digest: value_digest(RESULT_TAG, &result),
             result,
@@ -431,8 +512,9 @@ impl Lab {
         id: ExperimentId,
     ) -> Result<(ArtifactVerification, VerificationRecord)> {
         let record = self.registry.get(id)?;
-        let spec_digest_ok = DifferentialSpec::from_json(record.spec.clone())
-            .is_ok_and(|spec| spec.digest() == record.spec_digest);
+        let spec_digest_ok =
+            crate::spec::envelope_digest(&record.kind, record.spec_version, &record.spec)
+                == record.spec_digest;
         let result_digest_ok = record
             .result
             .as_ref()
@@ -445,16 +527,21 @@ impl Lab {
                 state,
             });
         }
-        let traces_consistent = record.result.as_ref().map(|result| {
-            let compared = result["boundaries_compared"].as_u64();
-            ["left_trace", "right_trace"].iter().all(|role| {
-                record
-                    .artifacts
-                    .iter()
-                    .find(|a| a.role == *role)
-                    .is_some_and(|a| compared.is_some_and(|c| a.size == c * 32))
-            })
-        });
+        let differential = record.kind == crate::spec::DIFFERENTIAL_REPLAY;
+        let traces_consistent = record
+            .result
+            .as_ref()
+            .filter(|_| differential)
+            .map(|result| {
+                let compared = result["boundaries_compared"].as_u64();
+                ["left_trace", "right_trace"].iter().all(|role| {
+                    record
+                        .artifacts
+                        .iter()
+                        .find(|a| a.role == *role)
+                        .is_some_and(|a| compared.is_some_and(|c| a.size == c * 32))
+                })
+            });
         let ok = spec_digest_ok
             && result_digest_ok != Some(false)
             && traces_consistent != Some(false)
@@ -502,6 +589,15 @@ impl Lab {
     /// [`LabError::InvalidState`] unless the experiment is `completed`.
     pub fn reproduce(&self, id: ExperimentId, store: &EventStore) -> Result<VerificationRecord> {
         let record = self.registry.get(id)?;
+        if record.kind != crate::spec::DIFFERENTIAL_REPLAY {
+            return Err(LabError::InvalidState {
+                id,
+                reason: format!(
+                    "{} experiments are reproduced with the orbit-reliability tool",
+                    record.kind
+                ),
+            });
+        }
         let (Status::Completed, Some(recorded_input), Some(recorded_result)) =
             (record.status, record.input.as_ref(), record.result.as_ref())
         else {
@@ -714,7 +810,7 @@ impl Lab {
         let (Status::Completed, Some(input)) = (record.status, record.input.as_ref()) else {
             return Err(LabError::InvalidState {
                 id,
-                reason: "only completed experiments have a trace".to_owned(),
+                reason: "only completed differential replays have a trace".to_owned(),
             });
         };
         let left = self.artifact(id, "left_trace")?;

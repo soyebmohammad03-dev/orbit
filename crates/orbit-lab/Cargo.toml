@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "orbit-lab"
 
 [dependencies]
 orbit-core = { version = "0.1.0", path = "../orbit-core" }
@@ -16,7 +17,19 @@ thiserror = "2.0.21"
 tracing = "0.1.44"
 uuid = { version = "1.28.0", features = ["v7", "serde"] }
 
+[features]
+# Reliability scenarios: lab fault hooks, orbit-core's fault-injection hooks,
+# and the `orbit-reliability` tool. Off by default. orbit-api never enables
+# it (a CI step checks its feature graph). The test suite turns it on through
+# the self dev-dependency below.
+reliability = ["orbit-core/fault-injection"]
+
+[[bin]]
+name = "orbit-reliability"
+required-features = ["reliability"]
+
 [dev-dependencies]
+orbit-lab = { path = ".", features = ["reliability"] }
 proptest = "1.12.0"
 tempfile = "3.27.0"
 

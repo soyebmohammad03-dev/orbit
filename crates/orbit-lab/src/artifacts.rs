@@ -36,9 +36,17 @@ pub enum ArtifactState {
 }
 
 /// The artifact directory.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ArtifactStore {
     root: PathBuf,
+    #[cfg(feature = "reliability")]
+    pub(crate) hook: crate::fault::HookSlot,
+}
+
+impl std::fmt::Debug for ArtifactStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArtifactStore").finish_non_exhaustive()
+    }
 }
 
 impl ArtifactStore {
@@ -51,6 +59,8 @@ impl ArtifactStore {
         fs::create_dir_all(root.join("tmp"))?;
         Ok(Self {
             root: root.to_path_buf(),
+            #[cfg(feature = "reliability")]
+            hook: crate::fault::HookSlot::default(),
         })
     }
 
@@ -74,21 +84,46 @@ impl ArtifactStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // A concurrent `remove_stale_temporaries` can, in a narrow window
+        // before the lock below is taken, delete a fresh temporary file; the
+        // rename then fails with NotFound and the write is retried.
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match self.write_once(bytes, &digest, &path) {
+                Err(LabError::Io(e))
+                    if e.kind() == std::io::ErrorKind::NotFound && attempts < 3 => {}
+                other => return other.map(|()| digest),
+            }
+        }
+    }
+
+    fn write_once(&self, bytes: &[u8], digest: &Digest, path: &Path) -> Result<()> {
         let tmp = self
             .root
             .join("tmp")
             .join(format!("{}-{}", digest.to_hex(), Uuid::now_v7()));
-        let result = (|| {
+        let result = (|| -> Result<()> {
             let mut file = fs::File::create_new(&tmp)?;
-            file.write_all(bytes)?;
+            // Held until the file is renamed: a process that finds a
+            // temporary file it can lock knows its writer is gone.
+            file.lock()?;
+            let half = bytes.len() / 2;
+            file.write_all(&bytes[..half])?;
+            #[cfg(feature = "reliability")]
+            crate::fault::check(
+                &self.hook,
+                crate::fault::LabFaultPoint::ArtifactAfterPartialWrite,
+            )?;
+            file.write_all(&bytes[half..])?;
             file.sync_all()?;
-            fs::rename(&tmp, &path)
+            fs::rename(&tmp, path)?;
+            Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
         }
-        result?;
-        Ok(digest)
+        result
     }
 
     /// Compares the file for `digest` with the recorded `size` and digest.
@@ -129,6 +164,60 @@ impl ArtifactStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Removes temporary files left by writers that no longer exist (a
+    /// process that died while writing). A file whose lock is still held
+    /// belongs to a live writer and is kept. Returns how many were removed.
+    ///
+    /// # Errors
+    /// I/O errors.
+    pub fn remove_stale_temporaries(&self) -> Result<u64> {
+        let mut removed = 0;
+        for entry in fs::read_dir(self.root.join("tmp"))? {
+            let path = entry?.path();
+            let Ok(file) = fs::OpenOptions::new().write(true).open(&path) else {
+                continue;
+            };
+            if file.try_lock().is_ok() {
+                drop(file);
+                if fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Number of files in the temporary directory.
+    ///
+    /// # Errors
+    /// I/O errors.
+    pub fn temporary_files(&self) -> Result<u64> {
+        Ok(fs::read_dir(self.root.join("tmp"))?.count() as u64)
+    }
+
+    /// Digests of every artifact file present.
+    ///
+    /// # Errors
+    /// I/O errors.
+    pub fn stored_digests(&self) -> Result<Vec<Digest>> {
+        let mut out = Vec::new();
+        for prefix in fs::read_dir(self.root.join("sha256"))? {
+            let prefix = prefix?;
+            let head = prefix.file_name().to_string_lossy().into_owned();
+            if !prefix.file_type()?.is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(prefix.path())? {
+                let name = file?.file_name().to_string_lossy().into_owned();
+                if let Ok(d) = Digest::from_hex(&format!("{head}{name}")) {
+                    out.push(d);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// Location of an artifact file, for tests and local tooling. Never

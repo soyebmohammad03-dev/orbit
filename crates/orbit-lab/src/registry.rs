@@ -49,11 +49,11 @@ use crate::spec::{DIFFERENTIAL_REPLAY, DifferentialSpec, SPEC_VERSION};
 /// event store's, so neither can be opened as the other.
 pub const APPLICATION_ID: i64 = 0x4F52_4C42;
 /// Newest registry schema version.
-pub const LATEST_VERSION: i64 = 2;
+pub const LATEST_VERSION: i64 = 3;
 /// How long a writer waits for a lock held by another connection.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 3] = [
     r"
 CREATE TABLE experiments (
     id              BLOB PRIMARY KEY CHECK (length(id) = 16),
@@ -172,6 +172,101 @@ WHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind
   OR NEW.created_at IS NOT OLD.created_at
   OR (OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at)
 BEGIN SELECT RAISE(ABORT, 'experiment identity columns are immutable'); END;
+",
+    r"
+-- v3 (Sprint 9): admit reliability experiments. They have no stream or
+-- implementations and no single input range, so those columns become
+-- optional for them (still required for differential replays). SQLite
+-- cannot alter a CHECK constraint, so the table is rebuilt; triggers that
+-- mention it are dropped first and recreated unchanged afterwards. Runs with
+-- foreign keys disabled (see `Registry::open`), followed by a foreign-key check.
+DROP TRIGGER experiment_artifacts_only_while_running;
+DROP TRIGGER verifications_only_when_finished;
+DROP TRIGGER experiments_no_delete;
+DROP TRIGGER experiments_lifecycle;
+DROP TRIGGER experiments_identity_is_immutable;
+DROP INDEX experiments_by_stream;
+
+CREATE TABLE experiments_v3 (
+    id              BLOB PRIMARY KEY CHECK (length(id) = 16),
+    kind            TEXT NOT NULL CHECK (kind IN ('differential_replay', 'reliability')),
+    spec_version    INTEGER NOT NULL CHECK (spec_version >= 1),
+    spec            TEXT NOT NULL,
+    spec_digest     BLOB NOT NULL CHECK (length(spec_digest) = 32),
+    stream_id       TEXT,
+    left_impl       TEXT,
+    right_impl      TEXT,
+    implementations TEXT NOT NULL,
+    orbit_version   TEXT NOT NULL,
+    git_commit      TEXT,
+    created_at      INTEGER NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('created', 'running', 'completed', 'failed')),
+    started_at      INTEGER,
+    finished_at     INTEGER,
+    elapsed_micros  INTEGER,
+    input           TEXT,
+    outcome         TEXT,
+    result          TEXT,
+    result_digest   BLOB CHECK (result_digest IS NULL OR length(result_digest) = 32),
+    reproducibility TEXT CHECK (reproducibility IS NULL
+                                OR reproducibility IN ('reproducible', 'unverified', 'not_reproducible')),
+    failure         TEXT,
+    executable_digest BLOB CHECK (executable_digest IS NULL OR length(executable_digest) = 32),
+    CHECK (kind <> 'differential_replay'
+           OR (stream_id IS NOT NULL AND left_impl IS NOT NULL AND right_impl IS NOT NULL)),
+    CHECK (CASE status
+        WHEN 'created' THEN started_at IS NULL AND finished_at IS NULL
+                            AND result IS NULL AND failure IS NULL
+        WHEN 'running' THEN started_at IS NOT NULL AND finished_at IS NULL
+                            AND result IS NULL AND failure IS NULL
+        WHEN 'completed' THEN started_at IS NOT NULL AND finished_at IS NOT NULL
+                            AND (input IS NOT NULL OR kind <> 'differential_replay')
+                            AND outcome IS NOT NULL AND result IS NOT NULL
+                            AND result_digest IS NOT NULL AND reproducibility IS NOT NULL
+                            AND failure IS NULL
+        WHEN 'failed' THEN finished_at IS NOT NULL AND failure IS NOT NULL AND result IS NULL
+    END)
+);
+INSERT INTO experiments_v3 (id, kind, spec_version, spec, spec_digest, stream_id, left_impl,
+    right_impl, implementations, orbit_version, git_commit, created_at, status, started_at,
+    finished_at, elapsed_micros, input, outcome, result, result_digest, reproducibility, failure,
+    executable_digest)
+SELECT id, kind, spec_version, spec, spec_digest, stream_id, left_impl,
+    right_impl, implementations, orbit_version, git_commit, created_at, status, started_at,
+    finished_at, elapsed_micros, input, outcome, result, result_digest, reproducibility, failure,
+    executable_digest
+FROM experiments;
+DROP TABLE experiments;
+ALTER TABLE experiments_v3 RENAME TO experiments;
+CREATE INDEX experiments_by_stream ON experiments (stream_id, id);
+
+CREATE TRIGGER experiments_no_delete BEFORE DELETE ON experiments
+BEGIN SELECT RAISE(ABORT, 'experiments are never deleted'); END;
+
+CREATE TRIGGER experiments_lifecycle BEFORE UPDATE ON experiments
+WHEN NOT ((OLD.status = 'created' AND NEW.status IN ('running', 'failed'))
+       OR (OLD.status = 'running' AND NEW.status IN ('completed', 'failed')))
+BEGIN SELECT RAISE(ABORT, 'invalid experiment status transition'); END;
+
+CREATE TRIGGER experiments_identity_is_immutable BEFORE UPDATE ON experiments
+WHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind
+  OR NEW.spec_version IS NOT OLD.spec_version OR NEW.spec IS NOT OLD.spec
+  OR NEW.spec_digest IS NOT OLD.spec_digest OR NEW.stream_id IS NOT OLD.stream_id
+  OR NEW.left_impl IS NOT OLD.left_impl OR NEW.right_impl IS NOT OLD.right_impl
+  OR NEW.implementations IS NOT OLD.implementations
+  OR NEW.orbit_version IS NOT OLD.orbit_version OR NEW.git_commit IS NOT OLD.git_commit
+  OR NEW.executable_digest IS NOT OLD.executable_digest
+  OR NEW.created_at IS NOT OLD.created_at
+  OR (OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at)
+BEGIN SELECT RAISE(ABORT, 'experiment identity columns are immutable'); END;
+
+CREATE TRIGGER experiment_artifacts_only_while_running BEFORE INSERT ON experiment_artifacts
+WHEN (SELECT status FROM experiments WHERE id = NEW.experiment_id) IS NOT 'running'
+BEGIN SELECT RAISE(ABORT, 'artifacts can only be attached to a running experiment'); END;
+
+CREATE TRIGGER verifications_only_when_finished BEFORE INSERT ON verifications
+WHEN (SELECT status FROM experiments WHERE id = NEW.experiment_id) NOT IN ('completed', 'failed')
+BEGIN SELECT RAISE(ABORT, 'only finished experiments can be verified'); END;
 ",
 ];
 
@@ -298,6 +393,10 @@ pub enum FailureKind {
     Interrupted,
     /// Anything else (registry or artifact I/O, store errors).
     Internal,
+    /// A reliability scenario could not set up or observe its experiment
+    /// (for example a child process could not be started). Says nothing
+    /// about the reliability of the system under test.
+    Infrastructure,
 }
 
 /// Why an experiment failed.
@@ -339,8 +438,8 @@ pub struct ArtifactRef {
 /// Everything recorded when an experiment completes.
 #[derive(Debug, Clone)]
 pub struct Completion {
-    /// Resolved input.
-    pub input: InputRange,
+    /// Resolved input (differential replays).
+    pub input: Option<InputRange>,
     /// Outcome label.
     pub outcome: String,
     /// The result document.
@@ -358,12 +457,46 @@ pub struct Completion {
 /// A new experiment to record.
 #[derive(Debug, Clone)]
 pub struct NewExperiment {
-    /// The validated specification.
-    pub spec: DifferentialSpec,
-    /// Descriptors of the implementations, as `{"side": …, "descriptor": …}` objects.
+    /// Experiment kind (`differential_replay` or `reliability`).
+    pub kind: &'static str,
+    /// Specification format version.
+    pub spec_version: u32,
+    /// The validated specification, every default written out.
+    pub spec: Value,
+    /// Stream, for differential replays.
+    pub stream: Option<String>,
+    /// Left implementation id, for differential replays.
+    pub left: Option<String>,
+    /// Right implementation id, for differential replays.
+    pub right: Option<String>,
+    /// Descriptors of the implementations, as `{"side": …, "descriptor": …}`
+    /// objects (an empty array for reliability experiments).
     pub implementations: Value,
     /// The build creating it.
     pub build: BuildInfo,
+}
+
+impl NewExperiment {
+    /// A differential replay.
+    ///
+    /// # Errors
+    /// If the spec cannot be serialized.
+    pub fn differential(
+        spec: &DifferentialSpec,
+        implementations: Value,
+        build: BuildInfo,
+    ) -> Result<Self> {
+        Ok(Self {
+            kind: DIFFERENTIAL_REPLAY,
+            spec_version: SPEC_VERSION,
+            spec: serde_json::to_value(spec)?,
+            stream: Some(spec.stream.clone()),
+            left: Some(spec.left.clone()),
+            right: Some(spec.right.clone()),
+            implementations,
+            build,
+        })
+    }
 }
 
 /// A stored experiment.
@@ -423,12 +556,12 @@ pub struct ExperimentSummary {
     pub status: Status,
     /// When it was created.
     pub created_at: Timestamp,
-    /// Input stream.
-    pub stream: String,
-    /// Left implementation id.
-    pub left: String,
-    /// Right implementation id.
-    pub right: String,
+    /// Input stream (differential replays).
+    pub stream: Option<String>,
+    /// Left implementation id (differential replays).
+    pub left: Option<String>,
+    /// Right implementation id (differential replays).
+    pub right: Option<String>,
     /// Outcome label, once completed.
     pub outcome: Option<String>,
     /// Reproducibility status, once completed.
@@ -519,8 +652,21 @@ impl Registry {
             )));
         }
         conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.pragma_update(None, "foreign_keys", true)?;
+        // Migrations that rebuild a table need foreign keys off; the pragma
+        // can only change outside a transaction. They are checked afterwards.
+        conn.pragma_update(None, "foreign_keys", false)?;
         migrate(&mut conn)?;
+        let violations: i64 =
+            conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })?;
+        if violations != 0 {
+            return Err(LabError::CorruptRecord {
+                record: "registry".to_owned(),
+                reason: format!("{violations} foreign-key violations after migration"),
+            });
+        }
+        conn.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -540,7 +686,8 @@ impl Registry {
     /// Database errors.
     pub fn create(&self, new: &NewExperiment) -> Result<ExperimentId> {
         let id = ExperimentId::generate();
-        let spec = to_json(&new.spec)?;
+        let spec = to_canonical_string(&new.spec);
+        let digest = crate::spec::envelope_digest(new.kind, new.spec_version, &new.spec);
         let conn = self.conn();
         conn.execute(
             "INSERT INTO experiments (id, kind, spec_version, spec, spec_digest, stream_id,
@@ -549,13 +696,13 @@ impl Registry {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'created')",
             params![
                 id.0.as_bytes().as_slice(),
-                DIFFERENTIAL_REPLAY,
-                SPEC_VERSION,
+                new.kind,
+                new.spec_version,
                 spec,
-                new.spec.digest().as_bytes().as_slice(),
-                new.spec.stream,
-                new.spec.left,
-                new.spec.right,
+                digest.as_bytes().as_slice(),
+                new.stream,
+                new.left,
+                new.right,
                 to_canonical_string(&new.implementations),
                 new.build.orbit_version,
                 new.build.git_commit,
@@ -660,7 +807,7 @@ impl Registry {
                 id.0.as_bytes().as_slice(),
                 at,
                 i64::try_from(completion.elapsed_micros).unwrap_or(i64::MAX),
-                to_json(&completion.input)?,
+                completion.input.as_ref().map(to_json).transpose()?,
                 completion.outcome,
                 to_canonical_string(&completion.result),
                 completion.result_digest.as_bytes().as_slice(),
@@ -776,9 +923,9 @@ impl Registry {
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
                 ))
@@ -806,6 +953,32 @@ impl Registry {
                 },
             )
             .collect()
+    }
+
+    /// Digests of every artifact linked to some experiment.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn linked_artifact_digests(&self) -> Result<std::collections::BTreeSet<Digest>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT digest FROM experiment_artifacts")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.iter()
+            .map(|b| Digest::from_slice(b).map_err(|e| corrupt("artifact link", e)))
+            .collect()
+    }
+
+    /// Number of rows in the `artifacts` table.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn artifact_count(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn()
+            .query_row("SELECT count(*) FROM artifacts", [], |r| r.get(0))?;
+        Ok(u64::try_from(n).unwrap_or_default())
     }
 
     /// Ids of experiments currently in status `running`.

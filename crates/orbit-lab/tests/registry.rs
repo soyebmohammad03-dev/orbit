@@ -12,11 +12,12 @@ use orbit_lab::{BuildInfo, ExperimentId, LabError, Status};
 use serde_json::json;
 
 fn new_experiment(stream: &str) -> NewExperiment {
-    NewExperiment {
-        spec: spec(stream, "orbit.counter", "orbit.counter"),
-        implementations: json!([]),
-        build: BuildInfo::current(),
-    }
+    NewExperiment::differential(
+        &spec(stream, "orbit.counter", "orbit.counter"),
+        json!([]),
+        BuildInfo::current(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -32,7 +33,7 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
     let app: i64 = raw
         .query_row("PRAGMA application_id", [], |r| r.get(0))
         .unwrap();
-    assert_eq!((version, app), (2, orbit_lab::registry::APPLICATION_ID));
+    assert_eq!((version, app), (3, orbit_lab::registry::APPLICATION_ID));
     let mut tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
         .unwrap()
@@ -67,7 +68,7 @@ fn initialization_is_deterministic_and_refuses_foreign_files() {
         Registry::open(&path),
         Err(LabError::UnsupportedSchemaVersion {
             found: 99,
-            supported: 2
+            supported: 3
         })
     ));
 
@@ -223,8 +224,11 @@ fn experiments_persist_across_restarts() {
         [failed.id, done.id]
     );
     assert_eq!(listed[1].outcome.as_deref(), Some("diverged"));
-    assert_eq!(listed[1].left, "orbit.counter");
-    assert_eq!(listed[1].right, "example.counter-floor-at-zero");
+    assert_eq!(listed[1].left.as_deref(), Some("orbit.counter"));
+    assert_eq!(
+        listed[1].right.as_deref(),
+        Some("example.counter-floor-at-zero")
+    );
     // Cursor pagination.
     let page = lab.list(1, Some(failed.id)).unwrap();
     assert_eq!(page.iter().map(|s| s.id).collect::<Vec<_>>(), [done.id]);

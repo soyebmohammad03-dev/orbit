@@ -378,7 +378,9 @@ impl From<orbit_lab::LabError> for ApiError {
             | E::UnsupportedSchemaVersion { .. }
             | E::Registry(_)
             | E::Io(_)
-            | E::Json(_) => (StatusCode::INTERNAL_SERVER_ERROR, "lab_error", Value::Null),
+            | E::Json(_)
+            // Cannot happen here: the API never installs a lab fault hook.
+            | E::InjectedFault(_) => (StatusCode::INTERNAL_SERVER_ERROR, "lab_error", Value::Null),
         };
         Self {
             status,

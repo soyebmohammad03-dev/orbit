@@ -39,9 +39,11 @@ pub mod catalog;
 pub mod differential;
 pub mod digest;
 pub mod error;
+pub mod fault;
 pub mod identity;
 pub mod lab;
 pub mod registry;
+pub mod reliability;
 pub mod spec;
 pub mod variants;
 

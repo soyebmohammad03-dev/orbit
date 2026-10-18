@@ -995,6 +995,7 @@ name = "orbit-lab"
 version = "0.1.0"
 dependencies = [
  "orbit-core",
+ "orbit-lab",
  "proptest",
  "rusqlite",
  "serde",

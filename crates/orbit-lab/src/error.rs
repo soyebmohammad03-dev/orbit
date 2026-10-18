@@ -87,6 +87,9 @@ pub enum LabError {
     /// JSON encoding failed.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// A lab fault hook injected a failure (reliability scenarios only).
+    #[error("injected fault at {0}")]
+    InjectedFault(crate::fault::LabFaultPoint),
 }
 
 /// Result alias for lab operations.

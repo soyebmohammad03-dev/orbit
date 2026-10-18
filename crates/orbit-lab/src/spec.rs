@@ -157,3 +157,13 @@ impl DifferentialSpec {
         value_digest(SPEC_TAG, &self.envelope())
     }
 }
+
+/// Digest of a stored specification: `ORBIT-LAB-SPEC-V1` over the canonical
+/// `{"kind", "spec_version", "spec"}` envelope. The same for every kind.
+#[must_use]
+pub fn envelope_digest(kind: &str, spec_version: u32, spec: &Value) -> Digest {
+    value_digest(
+        SPEC_TAG,
+        &json!({ "kind": kind, "spec_version": spec_version, "spec": spec }),
+    )
+}
