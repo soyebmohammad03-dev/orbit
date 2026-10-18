@@ -33,6 +33,7 @@ import type {
     StoredEvent,
     StreamDetail,
     StreamPage,
+    ScenarioInfo,
     TracePage,
 } from "./types";
 
@@ -185,6 +186,7 @@ export function createClient(options: ClientOptions = {}) {
         getLabExperiment: (id: string) => get<ExperimentDetail>(`/lab/experiments/${seg(id)}`),
         verifyLabExperiment: (id: string) => post<ArtifactVerificationResponse>(`/lab/experiments/${seg(id)}/verify`),
         reproduceLabExperiment: (id: string) => post<VerificationRecord>(`/lab/experiments/${seg(id)}/reproduce`),
+        reliabilityScenarios: () => get<{ scenarios: ScenarioInfo[]; execution: string }>("/lab/reliability/scenarios"),
         getLabTrace: (id: string, p: { from?: number; limit?: number } = {}) =>
             get<TracePage>(`/lab/experiments/${seg(id)}/trace${query(p)}`),
     };

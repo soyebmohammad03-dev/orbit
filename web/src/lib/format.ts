@@ -95,6 +95,9 @@ export const LAB_OUTCOME_LABELS: Record<string, string> = {
     diverged: "Diverged",
     implementation_failed: "Implementation failed",
     nondeterministic: "Nondeterministic",
+    invariants_preserved: "Invariants preserved",
+    invariant_violated: "Invariant violated",
+    inconclusive: "Inconclusive",
 };
 
 /**
@@ -111,7 +114,12 @@ export function labOutcomeTone(outcome: string | null | undefined): Tone {
         case "implementation_failed":
             return "warn";
         case "nondeterministic":
+        case "invariant_violated":
             return "fail";
+        case "invariants_preserved":
+            return "ok";
+        case "inconclusive":
+            return "warn";
         default:
             return "neutral";
     }

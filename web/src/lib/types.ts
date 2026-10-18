@@ -389,13 +389,15 @@ export interface DifferentialSpec {
 
 export interface ExperimentSummary {
     id: string;
-    kind: string;
+    kind: "differential_replay" | "reliability" | string;
     status: ExperimentStatus;
     created_at: string;
-    stream: string;
-    left: string;
-    right: string;
-    outcome: LabOutcome | null;
+    /** Differential replays only. */
+    stream: string | null;
+    left: string | null;
+    right: string | null;
+    /** A differential outcome or a reliability verdict. */
+    outcome: string | null;
     reproducibility: Reproducibility | null;
 }
 
@@ -555,7 +557,8 @@ export interface ExperimentRecord {
     id: string;
     kind: string;
     spec_version: number;
-    spec: DifferentialSpec;
+    /** A DifferentialSpec, or for reliability experiments `{scenario, scenario_version, parameters}`. */
+    spec: DifferentialSpec & { scenario?: string; scenario_version?: number; parameters?: Record<string, number> };
     spec_digest: string;
     implementations: { side: LabSide; descriptor: ImplementationDescriptor }[];
     build: BuildInfo;
@@ -565,7 +568,8 @@ export interface ExperimentRecord {
     finished_at: string | null;
     elapsed_micros: number | null;
     input: InputRange | null;
-    outcome: LabOutcome | null;
+    outcome: string | null;
+    /** For reliability experiments, a ReliabilityResult (see `kind`). */
     result: DifferentialResult | null;
     result_digest: string | null;
     reproducibility: Reproducibility | null;
@@ -597,4 +601,64 @@ export interface ArtifactVerificationResponse {
         artifacts: (LabArtifact & { state: "intact" | "missing" | "corrupted" })[];
     };
     verification: VerificationRecord;
+}
+
+// ---- Reliability scenarios (orbit-lab, run only by the orbit-reliability tool) ----
+
+export interface ScenarioInfo {
+    id: string;
+    version: number;
+    title: string;
+    summary: string;
+    simulates: string[];
+    does_not_simulate: string[];
+    invariants: string[];
+    parameters: { name: string; description: string; default: number; min: number; max: number }[];
+}
+
+export interface InvariantCheck {
+    name: string;
+    expected: string;
+    observed: string;
+    held: boolean;
+}
+
+export type FailureMode =
+    | "simulated_error"
+    | "process_abort"
+    | "process_killed"
+    | "process_paused"
+    | "deliberate_corruption"
+    | "concurrent_processes";
+
+export interface ReliabilityCase {
+    id: string;
+    fault_point: string | null;
+    mode: FailureMode;
+    real_process: boolean;
+    fault_observed: boolean;
+    fault_evidence: string;
+    invariants: InvariantCheck[];
+    recovery: Json;
+    integrity: Json;
+    verdict: "invariant_preserved" | "invariant_violated" | "inconclusive";
+}
+
+export interface ReliabilityResult {
+    result_version: number;
+    scenario: { id: string; version: number; title: string };
+    parameters: Record<string, number>;
+    history: { events: number; requests_digest: string };
+    cases: ReliabilityCase[];
+    summary: {
+        cases: number;
+        invariant_preserved: number;
+        invariant_violated: number;
+        inconclusive: number;
+        real_process_cases: number;
+    };
+    verdict: "invariants_preserved" | "invariant_violated" | "inconclusive";
+    simulates: string[];
+    does_not_simulate: string[];
+    limitations: string[];
 }

@@ -21,6 +21,12 @@ test("run, inspect, verify and reproduce a differential replay", async ({ page, 
 
     await page.goto("/experiments");
     await expect(page.getByRole("heading", { level: 1, name: "Experiments" })).toBeVisible();
+    // Reliability scenarios are listed from the API, but cannot be run here.
+    const scenarios = page.getByRole("list", { name: "Reliability scenarios" });
+    await expect(scenarios.getByRole("listitem")).toHaveCount(4);
+    await expect(scenarios).toContainText("registry-concurrency");
+    await expect(page.getByRole("button", { name: /reliability|scenario/i })).toHaveCount(0);
+
     await page.getByLabel("Stream").selectOption(stream);
     await page.getByLabel("Left implementation").selectOption("orbit.counter");
     await page.getByLabel("Right implementation").selectOption("example.counter-floor-at-zero");

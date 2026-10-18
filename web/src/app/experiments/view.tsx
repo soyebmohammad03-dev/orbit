@@ -2,6 +2,7 @@
 
 import { type ReactNode, useState } from "react";
 
+import { ReliabilityCatalog, ReliabilitySummary } from "./reliability";
 import {
     ComparisonView,
     DiagnosisView,
@@ -90,7 +91,7 @@ export function ExperimentsView() {
                                 <thead>
                                     <tr>
                                         <Th>Experiment</Th>
-                                        <Th>Stream</Th>
+                                        <Th>Stream / kind</Th>
                                         <Th>Implementations</Th>
                                         <Th>Outcome</Th>
                                         <Th>Reproducibility</Th>
@@ -108,9 +109,11 @@ export function ExperimentsView() {
                                                     {shortDigest(e.id, 8, 4)}
                                                 </button>
                                             </Td>
-                                            <Td className="font-mono text-xs">{e.stream}</Td>
                                             <Td className="font-mono text-xs">
-                                                {e.left} ↔ {e.right}
+                                                {e.kind === "reliability" ? "reliability" : e.stream}
+                                            </Td>
+                                            <Td className="font-mono text-xs">
+                                                {e.kind === "reliability" ? "—" : `${e.left} ↔ ${e.right}`}
                                             </Td>
                                             <Td>
                                                 <LabOutcomeBadge record={e} />
@@ -128,12 +131,15 @@ export function ExperimentsView() {
                         <ExperimentPanel id={experimentId} onChanged={() => setRefresh((n) => n + 1)} />
                     ) : null}
                 </div>
-                <NewExperiment
-                    onCreated={(id) => {
-                        setRefresh((n) => n + 1);
-                        setExperiment(id);
-                    }}
-                />
+                <div className="flex min-w-0 flex-col gap-6">
+                    <NewExperiment
+                        onCreated={(id) => {
+                            setRefresh((n) => n + 1);
+                            setExperiment(id);
+                        }}
+                    />
+                    <ReliabilityCatalog />
+                </div>
             </div>
         </>
     );
@@ -240,7 +246,11 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
     const finished = experiment.status === "completed" || experiment.status === "failed";
     return (
         <>
-            <ExperimentSummary record={experiment} />
+            {experiment.kind === "reliability" ? (
+                <ReliabilitySummary record={experiment} />
+            ) : (
+                <ExperimentSummary record={experiment} />
+            )}
             <Card
                 title="Verification"
                 actions={
@@ -260,7 +270,12 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
                         </Button>
                         <Button
                             busy={reproduce.pending}
-                            disabled={experiment.status !== "completed"}
+                            disabled={experiment.status !== "completed" || experiment.kind === "reliability"}
+                            title={
+                                experiment.kind === "reliability"
+                                    ? "Reliability experiments are reproduced with the orbit-reliability tool"
+                                    : undefined
+                            }
                             onClick={async () => {
                                 if (await reproduce.run()) reload();
                             }}
@@ -341,7 +356,7 @@ function VerificationList({ items }: { items: VerificationRecord[] }) {
 export function ExperimentSummary({ record }: { record: ExperimentRecord }) {
     const result = record.result;
     const reference = result?.reference ?? null;
-    const stream = record.input?.stream ?? record.spec.stream;
+    const stream = record.input?.stream ?? record.spec.stream ?? "";
     const [traceAt, setTraceAt] = useState<number | null>(null);
     const timeline = result ? timelineOf(result) : null;
     return (
