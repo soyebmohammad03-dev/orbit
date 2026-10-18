@@ -120,3 +120,39 @@ fn experiments_without_a_creation_lock_file_are_left_alone() {
     let lab = env.lab();
     assert_eq!(lab.experiment(id).unwrap().status, Status::Created);
 }
+
+/// Regression: a run killed mid-measurement leaves its work directory; the
+/// next `Lab::open` removes it once the experiment is no longer running,
+/// and leaves directories it does not own alone.
+#[test]
+fn work_directories_of_finished_runs_are_removed_on_open() {
+    let env = Env::new();
+    let id = {
+        let lab = env.lab();
+        let record = lab
+            .measure_performance(
+                &orbit_lab::performance::PerformanceSpec::from_json(serde_json::json!({
+                    "workload": "integrity-verification", "input_size": 5, "measured_iterations": 1,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        record.id
+    };
+    let stale = env.lab_dir.join("performance-work").join(id.to_string());
+    let unknown = env
+        .lab_dir
+        .join("reliability-work")
+        .join(format!("{id}-reproduction-x"));
+    let foreign = env
+        .lab_dir
+        .join("reliability-work")
+        .join(orbit_lab::ExperimentId::generate().to_string());
+    for dir in [&stale, &unknown, &foreign] {
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+    }
+    let _lab = env.lab();
+    assert!(!stale.exists(), "the finished run's directory is removed");
+    assert!(!foreign.exists(), "an id with no experiment is not running");
+    assert!(unknown.exists(), "other names are left alone");
+}

@@ -157,6 +157,10 @@ impl Lab {
                 "marked abandoned experiments as failed"
             );
         }
+        let stale = lab.remove_stale_work_dirs()?;
+        if stale > 0 {
+            tracing::warn!(stale, "removed work directories of interrupted runs");
+        }
         let removed = lab.artifacts.remove_stale_temporaries()?;
         if removed > 0 {
             tracing::warn!(
@@ -326,6 +330,47 @@ impl Lab {
             }
         }
         Ok(recovered)
+    }
+
+    /// Removes `performance-work/<id>` and `reliability-work/<id>`
+    /// directories left by runs that were killed: those whose experiment is
+    /// no longer `running` (it finished, was marked interrupted, or never
+    /// existed). Directories with other names (for example a reliability
+    /// reproduction in progress) are left alone. Returns how many were removed.
+    ///
+    /// # Errors
+    /// I/O or registry errors.
+    pub fn remove_stale_work_dirs(&self) -> Result<u64> {
+        let mut removed = 0;
+        for area in ["performance-work", "reliability-work"] {
+            let Ok(entries) = fs::read_dir(self.dir.join(area)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if !kind.is_dir() {
+                    continue;
+                }
+                let Some(id) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<ExperimentId>().ok())
+                else {
+                    continue;
+                };
+                let running = match self.registry.get(id) {
+                    Ok(record) => record.status == Status::Running,
+                    Err(LabError::ExperimentNotFound(_)) => false,
+                    Err(e) => return Err(e),
+                };
+                if !running && fs::remove_dir_all(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 
     fn open_lock(&self, id: ExperimentId) -> Result<File> {
