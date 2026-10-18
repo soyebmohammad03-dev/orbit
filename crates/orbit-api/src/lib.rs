@@ -251,6 +251,10 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
             "/lab/experiments/{experiment_id}/trace",
             get(lab::get_trace),
         )
+        .route(
+            "/lab/reliability/scenarios",
+            get(lab::list_reliability_scenarios),
+        )
         .fallback(|| async {
             error::ApiError::not_found(
                 "route_not_found",

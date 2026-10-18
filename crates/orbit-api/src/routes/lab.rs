@@ -113,6 +113,13 @@ pub async fn create_experiment(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<CreateExperimentRequest>,
 ) -> Result<(StatusCode, ApiJson<Value>), ApiError> {
+    if body.kind == orbit_lab::reliability::RELIABILITY {
+        return Err(ApiError::bad_request(
+            "unsupported_experiment_kind",
+            "reliability experiments inject faults and kill processes, so this API cannot run them; \
+             use the orbit-reliability tool (see docs/RELIABILITY.md). Their results are listed here.",
+        ));
+    }
     if body.kind != orbit_lab::spec::DIFFERENTIAL_REPLAY {
         return Err(ApiError::bad_request(
             "unsupported_experiment_kind",
@@ -217,4 +224,18 @@ pub async fn get_trace(
         Ok(ApiJson(json(&lab.trace(id, query.from, limit)?)?))
     })
     .await
+}
+
+/// The supported reliability scenarios (read-only). They can only be run
+/// with the `orbit-reliability` tool; their results appear as experiments.
+#[utoipa::path(get, path = "/api/v1/lab/reliability/scenarios", tag = "lab",
+    responses((status = 200, description = "Scenario catalog", body = Object), (status = 503, body = ErrorResponse)))]
+pub async fn list_reliability_scenarios(
+    State(state): State<AppState>,
+) -> Result<ApiJson<Value>, ApiError> {
+    lab(&state)?;
+    Ok(ApiJson(serde_json::json!({
+        "scenarios": orbit_lab::reliability::SCENARIOS,
+        "execution": "orbit-reliability tool only (cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run <scenario>)",
+    })))
 }
