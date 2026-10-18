@@ -1267,6 +1267,277 @@ impl Registry {
     }
 }
 
+/// A stored imported bundle (see [`crate::bundle`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ImportedBundle {
+    /// Bundle digest (its identity).
+    pub bundle_digest: Digest,
+    /// Format version.
+    pub format_version: u32,
+    /// Experiment id recorded in the bundle (in the exporting lab).
+    pub experiment_id: ExperimentId,
+    /// Experiment kind.
+    pub kind: String,
+    /// Experiment status in the bundle.
+    pub status: String,
+    /// Outcome label in the bundle.
+    pub outcome: Option<String>,
+    /// The bundle's manifest and document (without entry contents).
+    pub document: Value,
+    /// The validation report produced when it was imported.
+    pub validation: Value,
+    /// When it was imported here.
+    pub imported_at: Timestamp,
+    /// Position in import order (pagination cursor).
+    pub sequence: i64,
+}
+
+/// A summary row of imported bundles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImportedBundleSummary {
+    /// Bundle digest.
+    pub bundle_digest: Digest,
+    /// Experiment id in the bundle.
+    pub experiment_id: ExperimentId,
+    /// Kind.
+    pub kind: String,
+    /// Status in the bundle.
+    pub status: String,
+    /// Outcome in the bundle.
+    pub outcome: Option<String>,
+    /// When it was imported.
+    pub imported_at: Timestamp,
+    /// Position in import order (pagination cursor).
+    pub sequence: i64,
+}
+
+/// A reproduction attempt of an imported bundle.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BundleVerification {
+    /// Identifier.
+    pub id: Uuid,
+    /// Bundle.
+    pub bundle_digest: Digest,
+    /// Always `reproduction`.
+    pub kind: VerificationKind,
+    /// [`crate::reproduction::ReproductionStatus`] label.
+    pub status: String,
+    /// Structured detail.
+    pub detail: Value,
+    /// When.
+    pub verified_at: Timestamp,
+}
+
+impl Registry {
+    /// Records an imported bundle unless one with the same digest exists.
+    /// Returns whether it was newly inserted. Existing rows are never changed.
+    ///
+    /// # Errors
+    /// Database errors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_imported_bundle(
+        &self,
+        digest: Digest,
+        format_version: u32,
+        experiment_id: ExperimentId,
+        kind: &str,
+        status: &str,
+        outcome: Option<&str>,
+        document: &Value,
+        validation: &Value,
+    ) -> Result<bool> {
+        let changed = self.conn().execute(
+            "INSERT OR IGNORE INTO imported_bundles (bundle_digest, format_version, experiment_id,
+                 kind, status, outcome, document, validation, imported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                digest.as_bytes().as_slice(),
+                format_version,
+                experiment_id.0.as_bytes().as_slice(),
+                kind,
+                status,
+                outcome,
+                to_canonical_string(document),
+                to_canonical_string(validation),
+                now()?,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// One imported bundle.
+    ///
+    /// # Errors
+    /// [`LabError::BundleNotFound`] or [`LabError::CorruptRecord`].
+    pub fn imported_bundle(&self, digest: Digest) -> Result<ImportedBundle> {
+        let conn = self.conn();
+        let row = conn
+            .query_row(
+                "SELECT format_version, experiment_id, kind, status, outcome, document, validation,
+                        imported_at, rowid
+                 FROM imported_bundles WHERE bundle_digest = ?1",
+                [digest.as_bytes().as_slice()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, i64>(7)?,
+                        r.get::<_, i64>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(LabError::BundleNotFound(digest))?;
+        let record = format!("bundle {digest}");
+        let (version, id, kind, status, outcome, document, validation, at, sequence) = row;
+        Ok(ImportedBundle {
+            bundle_digest: digest,
+            format_version: u32::try_from(version).map_err(|e| corrupt(&record, e))?,
+            experiment_id: ExperimentId::from_slice(&id)
+                .ok_or_else(|| corrupt(&record, "experiment id"))?,
+            kind,
+            status,
+            outcome,
+            document: serde_json::from_str(&document).map_err(|e| corrupt(&record, e))?,
+            validation: serde_json::from_str(&validation).map_err(|e| corrupt(&record, e))?,
+            imported_at: Timestamp::from_unix_micros(at).map_err(|e| corrupt(&record, e))?,
+            sequence,
+        })
+    }
+
+    /// Up to `limit` imported bundles, newest import first, strictly before
+    /// the `before` cursor (an [`ImportedBundleSummary::sequence`]).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn imported_bundles(
+        &self,
+        limit: usize,
+        before: Option<i64>,
+    ) -> Result<Vec<ImportedBundleSummary>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT bundle_digest, experiment_id, kind, status, outcome, imported_at, rowid
+             FROM imported_bundles WHERE ?1 IS NULL OR rowid < ?1 ORDER BY rowid DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![before, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(digest, id, kind, status, outcome, at, sequence)| {
+                let c = |e: &dyn fmt::Display| corrupt("imported bundle", e);
+                Ok(ImportedBundleSummary {
+                    bundle_digest: Digest::from_slice(&digest).map_err(|e| c(&e))?,
+                    experiment_id: ExperimentId::from_slice(&id)
+                        .ok_or_else(|| c(&"experiment id"))?,
+                    kind,
+                    status,
+                    outcome,
+                    imported_at: Timestamp::from_unix_micros(at).map_err(|e| c(&e))?,
+                    sequence,
+                })
+            })
+            .collect()
+    }
+
+    /// Appends a reproduction attempt of an imported bundle.
+    ///
+    /// # Errors
+    /// [`LabError::BundleNotFound`] or database errors.
+    pub fn add_bundle_verification(
+        &self,
+        digest: Digest,
+        status: &str,
+        detail: &Value,
+    ) -> Result<BundleVerification> {
+        let conn = self.conn();
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM imported_bundles WHERE bundle_digest = ?1",
+                [digest.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(LabError::BundleNotFound(digest));
+        }
+        let id = Uuid::now_v7();
+        let at = now()?;
+        conn.execute(
+            "INSERT INTO bundle_verifications (id, bundle_digest, kind, status, detail, verified_at)
+             VALUES (?1, ?2, 'reproduction', ?3, ?4, ?5)",
+            params![
+                id.as_bytes().as_slice(),
+                digest.as_bytes().as_slice(),
+                status,
+                to_canonical_string(detail),
+                at
+            ],
+        )?;
+        Ok(BundleVerification {
+            id,
+            bundle_digest: digest,
+            kind: VerificationKind::Reproduction,
+            status: status.to_owned(),
+            detail: detail.clone(),
+            verified_at: Timestamp::from_unix_micros(at).map_err(StoreError::from)?,
+        })
+    }
+
+    /// Reproduction attempts of an imported bundle, oldest first.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn bundle_verifications(&self, digest: Digest) -> Result<Vec<BundleVerification>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, status, detail, verified_at FROM bundle_verifications
+             WHERE bundle_digest = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([digest.as_bytes().as_slice()], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, status, detail, at)| {
+                let c = |e: &dyn fmt::Display| corrupt("bundle verification", e);
+                Ok(BundleVerification {
+                    id: Uuid::from_slice(&id).map_err(|e| c(&e))?,
+                    bundle_digest: digest,
+                    kind: VerificationKind::Reproduction,
+                    status,
+                    detail: serde_json::from_str(&detail).map_err(|e| c(&e))?,
+                    verified_at: Timestamp::from_unix_micros(at).map_err(|e| c(&e))?,
+                })
+            })
+            .collect()
+    }
+}
+
 struct RawExperiment {
     id: Vec<u8>,
     kind: String,

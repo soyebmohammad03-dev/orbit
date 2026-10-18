@@ -35,6 +35,7 @@
 //! ```
 
 pub mod artifacts;
+pub mod bundle;
 pub mod catalog;
 pub mod differential;
 pub mod digest;

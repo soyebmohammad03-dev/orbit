@@ -87,6 +87,12 @@ pub enum LabError {
     /// JSON encoding failed.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// No imported bundle has this digest.
+    #[error("imported bundle {0} not found")]
+    BundleNotFound(Digest),
+    /// A bundle failed validation; nothing was imported.
+    #[error("the bundle is not valid ({} problems); nothing was imported", .0.errors.len())]
+    InvalidBundle(Box<crate::bundle::ValidationReport>),
     /// A lab fault hook injected a failure (reliability scenarios only).
     #[error("injected fault at {0}")]
     InjectedFault(crate::fault::LabFaultPoint),

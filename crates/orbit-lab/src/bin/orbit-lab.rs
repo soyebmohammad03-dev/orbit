@@ -19,6 +19,12 @@
 //!                                     run a performance experiment
 //!   compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]
 //!                                     compare performance experiments
+//!   export ID --out FILE              write an evidence bundle (with the
+//!                                     input history when --db has it)
+//!   validate FILE                     validate a bundle; nothing is stored
+//!   import FILE                       validate and import a bundle
+//!   bundles [--limit N]               imported bundles, newest first
+//!   reproduce-bundle DIGEST           reproduce an imported bundle
 //! ```
 //!
 //! Performance numbers from a debug build are labelled `smoke`; measure
@@ -44,7 +50,8 @@ const USAGE: &str = "usage: orbit-lab [--db PATH] [--lab DIR] <implementations|r
   trace ID [--from N] [--limit N]
   workloads
   measure WORKLOAD [--input-size N] [--warmup N] [--iterations N] [--seed N]
-  compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]";
+  compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]
+  export ID --out FILE | validate FILE | import FILE | bundles [--limit N] | reproduce-bundle DIGEST";
 
 struct Args {
     db: PathBuf,
@@ -238,8 +245,76 @@ fn main_inner() -> Result<Value, String> {
             let from = number(&args.rest, "--from")?;
             json(&lab.trace(id, from, limit).map_err(|e| e.to_string())?)?
         }
+        "export" => {
+            let id = experiment_id(&args.rest)?;
+            let out = option(&args.rest, "--out").ok_or("export needs --out FILE")?;
+            let store = if args.db.is_file() {
+                Some(open_store(&args)?)
+            } else {
+                None
+            };
+            let bundle = lab
+                .export_bundle(id, store.as_ref())
+                .map_err(|e| e.to_string())?;
+            std::fs::write(out, &bundle.bytes).map_err(|e| format!("cannot write {out}: {e}"))?;
+            json!({
+                "bundle_digest": bundle.digest,
+                "bytes": bundle.bytes.len(),
+                "history_included": bundle.history_included,
+                "file": out,
+            })
+        }
+        "validate" | "import" => {
+            let file = args.rest.first().ok_or("a bundle file is required")?;
+            let bytes = read_bounded(file)?;
+            if args.command == "validate" {
+                json(&orbit_lab::bundle::validate(&bytes).0)?
+            } else {
+                match lab.import_bundle(&bytes) {
+                    Ok(outcome) => json(&outcome)?,
+                    Err(orbit_lab::LabError::InvalidBundle(report)) => {
+                        return Err(format!(
+                            "the bundle is not valid; nothing was imported\n{}",
+                            serde_json::to_string_pretty(&report).unwrap_or_default()
+                        ));
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        }
+        "bundles" => {
+            let limit = number(&args.rest, "--limit")?.unwrap_or(20);
+            let limit = usize::try_from(limit).map_err(|_| "--limit is too large")?;
+            json(
+                &lab.registry()
+                    .imported_bundles(limit, None)
+                    .map_err(|e| e.to_string())?,
+            )?
+        }
+        "reproduce-bundle" => {
+            let digest = args.rest.first().ok_or("a bundle digest is required")?;
+            let digest = orbit_core::Digest::from_hex(digest).map_err(|e| e.to_string())?;
+            json(
+                &lab.reproduce_bundle(digest, &RegressionPolicy::default())
+                    .map_err(|e| e.to_string())?,
+            )?
+        }
         other => return Err(format!("unknown command {other:?}\n{USAGE}")),
     })
+}
+
+/// Reads at most one byte more than a bundle may have, so an oversized
+/// file is rejected by validation without being read whole.
+fn read_bounded(file: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .and_then(|f| {
+            f.take(orbit_lab::bundle::MAX_BUNDLE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|e| format!("cannot read {file}: {e}"))?;
+    Ok(bytes)
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Result<Value, String> {

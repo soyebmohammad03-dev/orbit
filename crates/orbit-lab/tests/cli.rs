@@ -150,3 +150,53 @@ fn measure_compare_and_reproduce_performance_from_the_command_line() {
     let (ok, _, err) = cli(&env, &["measure", "event-append", "--input-size", "0"]);
     assert!(!ok && err.contains("input_size"), "{err}");
 }
+
+#[test]
+fn export_validate_import_and_reproduce_a_bundle_from_the_command_line() {
+    let env = Env::new();
+    {
+        let store = env.store();
+        seed(&store, "c", vec![inc(2), dec(5), inc(1)]);
+    }
+    let (ok, run, err) = cli(
+        &env,
+        &[
+            "run",
+            "--stream",
+            "c",
+            "--left",
+            "orbit.counter",
+            "--right",
+            "orbit.counter",
+        ],
+    );
+    assert!(ok, "{err}");
+    let id = run["id"].as_str().unwrap().to_owned();
+    let file = env.dir.path().join("bundle.json");
+    let file = file.to_str().unwrap();
+    let (ok, exported, err) = cli(&env, &["export", &id, "--out", file]);
+    assert!(ok, "{err}");
+    assert_eq!(exported["history_included"], true);
+    let (ok, report, _) = cli(&env, &["validate", file]);
+    assert!(ok);
+    assert_eq!(report["valid"], true);
+    assert_eq!(report["bundle_digest"], exported["bundle_digest"]);
+    let (ok, imported, err) = cli(&env, &["import", file]);
+    assert!(ok, "{err}");
+    assert_eq!(imported["newly_imported"], true);
+    let (ok, list, _) = cli(&env, &["bundles"]);
+    assert!(ok);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    let digest = exported["bundle_digest"].as_str().unwrap();
+    let (ok, attempt, err) = cli(&env, &["reproduce-bundle", digest]);
+    assert!(ok, "{err}");
+    assert_eq!(attempt["status"], "reproduced");
+    // A truncated copy is refused with its report.
+    let bytes = std::fs::read(file).unwrap();
+    std::fs::write(file, &bytes[..bytes.len() / 3]).unwrap();
+    let (ok, report, _) = cli(&env, &["validate", file]);
+    assert!(ok);
+    assert_eq!(report["errors"][0]["code"], "truncated");
+    let (ok, _, err) = cli(&env, &["import", file]);
+    assert!(!ok && err.contains("nothing was imported"), "{err}");
+}

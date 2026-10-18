@@ -568,6 +568,172 @@ fn seq(n: u64) -> Result<Sequence, Failure> {
     Sequence::new(n).map_err(|e| Failure::new(FailureKind::InvalidRange, e.to_string()))
 }
 
+/// Where a differential replay reads its events from: an [`EventStore`],
+/// or a [`MemoryHistory`] whose digest chain was verified when it was built.
+pub trait EventSource {
+    /// Up to `limit` events of `stream` after `after`, in order.
+    ///
+    /// # Errors
+    /// Store errors.
+    fn read_after(
+        &self,
+        stream: &StreamId,
+        after: Sequence,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, StoreError>;
+}
+
+impl EventSource for EventStore {
+    fn read_after(
+        &self,
+        stream: &StreamId,
+        after: Sequence,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, StoreError> {
+        EventStore::read_after(self, stream, after, limit)
+    }
+}
+
+/// Events `1..=n` of one stream held in memory, with every digest and the
+/// chain verified (built by [`MemoryHistory::verified`]).
+#[derive(Debug, Clone)]
+pub struct MemoryHistory {
+    stream: StreamId,
+    events: Vec<StoredEvent>,
+}
+
+impl MemoryHistory {
+    /// Checks that `events` are events `1..=n` of `stream` in order, that
+    /// each event's digest is the `ORBIT-EVENT-DIGEST-V1` digest of its own
+    /// fields, and that each links to the previous one.
+    ///
+    /// # Errors
+    /// A description of the first problem.
+    pub fn verified(stream: &str, events: Vec<StoredEvent>) -> Result<Self, String> {
+        let stream = StreamId::new(stream).map_err(|e| e.to_string())?;
+        let mut prev = Digest::GENESIS;
+        for (i, event) in events.iter().enumerate() {
+            let expected = i as u64 + 1;
+            if event.stream_id != stream || event.sequence.get() != expected {
+                return Err(format!("event {expected} is missing or out of order"));
+            }
+            if event.prev_digest != prev {
+                return Err(format!(
+                    "event {expected} does not link to event {}",
+                    expected - 1
+                ));
+            }
+            let computed = orbit_core::integrity::EventDigestInput {
+                stream_id: event.stream_id.as_str(),
+                sequence: event.sequence,
+                event_id: event.event_id,
+                event_type: event.event_type.as_str(),
+                schema_version: event.schema_version,
+                recorded_at: event.recorded_at,
+                payload: &to_canonical_string(&event.payload),
+                metadata: &to_canonical_string(&Value::Object(event.metadata.clone())),
+                prev_digest: event.prev_digest,
+            }
+            .compute();
+            if computed != event.digest {
+                return Err(format!("event {expected} does not match its digest"));
+            }
+            prev = event.digest;
+        }
+        Ok(Self { stream, events })
+    }
+
+    /// Number of events.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.events.len() as u64
+    }
+
+    /// Whether there are no events.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// The input range of `spec` over these events, computed exactly as
+    /// [`resolve_input`] computes it from a store.
+    ///
+    /// # Errors
+    /// A [`Failure`] if the range is not within these events.
+    pub fn resolve(&self, spec: &DifferentialSpec) -> Result<InputRange, Failure> {
+        let head = self.len();
+        let to = spec.to.unwrap_or(head);
+        if to > head || spec.from > to || to > MAX_EVENTS || spec.stream != self.stream.as_str() {
+            return Err(Failure::new(
+                FailureKind::HistoryUnavailable,
+                format!(
+                    "the history holds {head} events of {}; the experiment needs {}..={to} of {}",
+                    self.stream, spec.from, spec.stream
+                ),
+            ));
+        }
+        let digest_at = |n: u64| {
+            if n == 0 {
+                Digest::GENESIS
+            } else {
+                self.events[usize::try_from(n - 1).unwrap_or(usize::MAX)].digest
+            }
+        };
+        Ok(history_range(
+            &self.stream,
+            spec.from,
+            to,
+            digest_at(spec.from),
+            digest_at(to),
+        ))
+    }
+}
+
+impl EventSource for MemoryHistory {
+    fn read_after(
+        &self,
+        stream: &StreamId,
+        after: Sequence,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, StoreError> {
+        if *stream != self.stream {
+            return Err(StoreError::StreamNotFound(stream.clone()));
+        }
+        let start = usize::try_from(after.get()).unwrap_or(usize::MAX);
+        Ok(self
+            .events
+            .iter()
+            .skip(start)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+fn history_range(
+    stream: &StreamId,
+    from: u64,
+    to: u64,
+    from_event_digest: Digest,
+    to_event_digest: Digest,
+) -> InputRange {
+    let mut hasher = TaggedHasher::new(HISTORY_TAG);
+    hasher
+        .field(stream.as_str().as_bytes())
+        .field(&from.to_be_bytes())
+        .field(&to.to_be_bytes())
+        .field(from_event_digest.as_bytes())
+        .field(to_event_digest.as_bytes());
+    InputRange {
+        stream: stream.to_string(),
+        from,
+        to,
+        from_event_digest,
+        to_event_digest,
+        history_fingerprint: hasher.finish(),
+    }
+}
+
 /// Resolves and verifies the input history of `spec`.
 ///
 /// # Errors
@@ -628,27 +794,19 @@ pub fn resolve_input(store: &EventStore, spec: &DifferentialSpec) -> Result<Inpu
     };
     let from_event_digest = digest_at(spec.from)?;
     let to_event_digest = digest_at(to)?;
-    let mut hasher = TaggedHasher::new(HISTORY_TAG);
-    hasher
-        .field(stream.as_str().as_bytes())
-        .field(&spec.from.to_be_bytes())
-        .field(&to.to_be_bytes())
-        .field(from_event_digest.as_bytes())
-        .field(to_event_digest.as_bytes());
-    Ok(InputRange {
-        stream: stream.to_string(),
-        from: spec.from,
+    Ok(history_range(
+        &stream,
+        spec.from,
         to,
         from_event_digest,
         to_event_digest,
-        history_fingerprint: hasher.finish(),
-    })
+    ))
 }
 
 /// Calls `f` for events `1..=through` in order, checking continuity, until
 /// `f` breaks. Returns the number of events passed to `f`.
-fn walk(
-    store: &EventStore,
+fn walk<S: EventSource + ?Sized>(
+    store: &S,
     input: &InputRange,
     through: u64,
     mut f: impl FnMut(&StoredEvent) -> ControlFlow<()>,
@@ -749,8 +907,8 @@ impl<'a> Lane<'a> {
 /// Runs one implementation alone over events `1..=stop` (observing
 /// boundaries `from..=stop`), stopping at its first failure. `stop = None`
 /// only starts it.
-fn solo(
-    store: &EventStore,
+fn solo<S: EventSource + ?Sized>(
+    store: &S,
     input: &InputRange,
     side: Side,
     implementation: &dyn Implementation,
@@ -1076,8 +1234,8 @@ fn diagnose(
 ///
 /// # Errors
 /// A [`Failure`] if the history changes or cannot be read while executing.
-pub fn execute(
-    store: &EventStore,
+pub fn execute<S: EventSource + ?Sized>(
+    store: &S,
     spec: &DifferentialSpec,
     input: &InputRange,
     left: &dyn Implementation,

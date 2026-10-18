@@ -735,8 +735,14 @@ impl Lab {
             (Some(a), Some(b)) => Some(a == b),
             _ => None,
         };
-        let (status, mut detail) =
-            self.reproduction(&record, recorded_input, recorded_result, store)?;
+        let (status, mut detail) = self.differential_reproduction(
+            &record,
+            recorded_input,
+            recorded_result,
+            store,
+            |spec| differential::resolve_input(store, spec),
+            true,
+        )?;
         detail["build"] = json!({
             "recorded": record.build,
             "current": current,
@@ -766,12 +772,19 @@ impl Lab {
         })
     }
 
-    fn reproduction(
+    /// Re-executes a completed differential replay over `source` and
+    /// classifies the outcome (see [`reproduce`](Self::reproduce)). `resolve`
+    /// pins the input from `source`; with `check_artifacts` the recorded
+    /// artifacts must be present and intact in this lab (an imported bundle's
+    /// entries were verified when it was validated).
+    pub(crate) fn differential_reproduction<S: differential::EventSource + ?Sized>(
         &self,
         record: &ExperimentRecord,
         recorded_input: &InputRange,
         recorded_result: &Value,
-        store: &EventStore,
+        source: &S,
+        resolve: impl FnOnce(&DifferentialSpec) -> std::result::Result<InputRange, Failure>,
+        check_artifacts: bool,
     ) -> Result<(ReproductionStatus, Value)> {
         // 1. The configuration must be exactly what was recorded.
         let mut spec = match DifferentialSpec::from_json(record.spec.clone()) {
@@ -845,7 +858,7 @@ impl Lab {
         }
         // 4. The same pinned history.
         spec.to = Some(recorded_input.to);
-        let input = match differential::resolve_input(store, &spec) {
+        let input = match resolve(&spec) {
             Ok(input) => input,
             Err(failure) => {
                 return Ok((
@@ -862,7 +875,7 @@ impl Lab {
         }
         // 5. The recorded evidence must be complete to compare with.
         let mut damaged = Vec::new();
-        for artifact in &record.artifacts {
+        for artifact in record.artifacts.iter().filter(|_| check_artifacts) {
             let state = self.artifacts.check(&artifact.digest, artifact.size)?;
             if state != ArtifactState::Intact {
                 damaged.push(json!({ "role": artifact.role, "state": state }));
@@ -876,7 +889,8 @@ impl Lab {
         }
         // 6. Execute and compare.
         let [left, right] = self.implementations(&spec)?;
-        let run = match differential::execute(store, &spec, &input, left.as_ref(), right.as_ref()) {
+        let run = match differential::execute(source, &spec, &input, left.as_ref(), right.as_ref())
+        {
             Ok(run) => run,
             Err(failure) => {
                 return Ok((

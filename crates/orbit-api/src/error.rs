@@ -367,6 +367,16 @@ impl From<orbit_lab::LabError> for ApiError {
                 "invalid_state",
                 json!({ "experiment_id": id }),
             ),
+            E::BundleNotFound(digest) => (
+                StatusCode::NOT_FOUND,
+                "bundle_not_found",
+                json!({ "bundle_digest": digest }),
+            ),
+            E::InvalidBundle(report) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_bundle",
+                serde_json::to_value(&*report).unwrap_or(Value::Null),
+            ),
             E::ArtifactMissing(_) | E::ArtifactCorrupted(_) | E::CorruptRecord { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "integrity_violation",
