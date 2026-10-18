@@ -35,6 +35,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Clippy (libraries with default features, i.e. the production build without fault hooks)
         run: cargo clippy --workspace --lib --locked -- -D warnings
+      - name: The API build has no fault-injection hooks
+        run: |
+          if cargo tree -p orbit-api -e features --locked | grep -q fault-injection; then
+            echo "orbit-api enables orbit-core/fault-injection" >&2
+            exit 1
+          fi
       - name: Test
         run: cargo test --workspace --locked
       - name: Docs
@@ -49,6 +55,7 @@ jobs:
           cargo run -p orbit-core --example quickstart --locked
           cargo run -p orbit-core --example time_travel --locked
           cargo run -p orbit-core --example crash_lab --locked
+          cargo run -p orbit-lab --locked -- --lab target/ci-lab implementations
 
   web:
     name: web (lint, types, unit tests, build)
