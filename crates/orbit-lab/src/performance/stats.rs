@@ -395,10 +395,50 @@ pub struct MannWhitney {
     pub method: &'static str,
 }
 
-/// Two-sided Mann–Whitney U test of `a` against `b` (normal approximation
-/// with tie correction and continuity correction). It tests whether one
+/// Largest `n1 + n2` for which [`mann_whitney`] computes exact p-values.
+pub const MAX_EXACT_TOTAL: usize = 50;
+
+/// `P(U ≤ u)` under the null hypothesis, for samples of sizes `n1`, `n2`
+/// without ties, from the exact distribution of U: its generating function
+/// is the Gaussian binomial coefficient `[n1+n2 choose n1]_q`, computed with
+/// `[n, k] = [n−1, k−1] + q^k [n−1, k]`.
+#[must_use]
+pub fn mann_whitney_exact_cdf(n1: usize, n2: usize, u: usize) -> f64 {
+    let n = n1 + n2;
+    // table[k] = coefficients of [m choose k]_q for the current m.
+    let mut table: Vec<Vec<f64>> = vec![vec![1.0]];
+    for m in 1..=n {
+        let mut next: Vec<Vec<f64>> = Vec::with_capacity(m.min(n1) + 1);
+        for k in 0..=m.min(n1) {
+            let degree = k * (m - k);
+            let mut poly = vec![0.0; degree + 1];
+            if k > 0
+                && let Some(prev) = table.get(k - 1)
+            {
+                for (i, c) in prev.iter().enumerate() {
+                    poly[i] += c;
+                }
+            }
+            if let Some(prev) = table.get(k).filter(|_| k < m) {
+                for (i, c) in prev.iter().enumerate() {
+                    poly[i + k] += c;
+                }
+            }
+            next.push(poly);
+        }
+        table = next;
+    }
+    let counts = &table[n1];
+    let total: f64 = counts.iter().sum();
+    counts.iter().take(u + 1).sum::<f64>() / total
+}
+
+/// Two-sided Mann–Whitney U test of `a` against `b`. It tests whether one
 /// sample tends to be larger than the other, without assuming normality.
-/// Returns `None` if either sample is empty or every value is tied.
+/// Without ties and with `n1 + n2 ≤` [`MAX_EXACT_TOTAL`] the p-value is
+/// exact; otherwise it is the normal approximation with tie and continuity
+/// corrections. Returns `None` if either sample is empty or every value is
+/// tied.
 #[must_use]
 pub fn mann_whitney(a: &[f64], b: &[f64]) -> Option<MannWhitney> {
     let (n1, n2) = (a.len(), b.len());
@@ -437,6 +477,23 @@ pub fn mann_whitney(a: &[f64], b: &[f64]) -> Option<MannWhitney> {
     let diff = u - mu;
     let corrected = (diff.abs() - 0.5).max(0.0) * diff.signum();
     let z = corrected / variance.sqrt();
+    if tie_term == 0.0 && n <= MAX_EXACT_TOTAL {
+        // U is an integer here (no ties, so no half ranks).
+        let ui = u.round() as usize;
+        let lower = mann_whitney_exact_cdf(n1, n2, ui);
+        let upper = 1.0
+            - if ui == 0 {
+                0.0
+            } else {
+                mann_whitney_exact_cdf(n1, n2, ui - 1)
+            };
+        return Some(MannWhitney {
+            u,
+            z,
+            p_value: (2.0 * lower.min(upper)).clamp(0.0, 1.0),
+            method: "mann_whitney_u_exact",
+        });
+    }
     let p_value = (2.0 * (1.0 - normal_cdf(z.abs()))).clamp(0.0, 1.0);
     Some(MannWhitney {
         u,
@@ -572,14 +629,55 @@ mod tests {
         // SciPy's documented example: U = 17 for these samples, asymptotic
         // two-sided p = 0.11134688653314041 (continuity corrected):
         // z = (17 − 10 − 0.5) / sqrt(5·4·10/12) and p = 2·(1 − Φ(z)).
+        // Without ties and with 9 values the exact distribution is used:
+        // SciPy documents the exact two-sided p as 0.1111111111111111 (= 14/126).
         let males = [19.0, 22.0, 16.0, 29.0, 24.0];
         let females = [20.0, 11.0, 17.0, 12.0];
         let r = mann_whitney(&males, &females).unwrap();
         assert!(close(r.u, 17.0, 1e-12));
-        assert!(close(r.p_value, 0.111_346_886_533_140_41, 1e-6));
+        assert_eq!(r.method, "mann_whitney_u_exact");
+        assert!(close(r.p_value, 14.0 / 126.0, 1e-12));
+        // The normal approximation (continuity corrected) for comparison,
+        // with the textbook's value: computed by hand below.
+        let z: f64 = (17.0 - 10.0 - 0.5) / (5.0 * 4.0 * 10.0 / 12.0_f64).sqrt();
+        assert!(close(
+            2.0 * (1.0 - normal_cdf(z)),
+            0.111_346_886_533_140_41,
+            1e-6
+        ));
         // Swapping the samples gives U = n1·n2 − 17 and the same p.
         let s = mann_whitney(&females, &males).unwrap();
         assert!(close(s.u, 3.0, 1e-12) && close(s.p_value, r.p_value, 1e-12));
+    }
+
+    #[test]
+    fn exact_mann_whitney_distribution() {
+        // 5 vs 5, fully separated: P(U = 0) = 1 / C(10, 5) = 1/252, so the
+        // two-sided p is 2/252 = 0.00793650…
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let b = [6.0, 7.0, 8.0, 9.0, 10.0];
+        let r = mann_whitney(&a, &b).unwrap();
+        assert!(close(r.p_value, 2.0 / 252.0, 1e-12));
+        // 3 vs 3 can never reach p < 0.05: the minimum is 2/20 = 0.1.
+        let r = mann_whitney(&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0]).unwrap();
+        assert!(close(r.p_value, 0.1, 1e-12));
+        // The distribution is complete and symmetric.
+        assert!(close(mann_whitney_exact_cdf(4, 6, 24), 1.0, 1e-12));
+        for u in 0..=24 {
+            let lower = mann_whitney_exact_cdf(4, 6, u);
+            let upper = 1.0
+                - if u == 0 {
+                    0.0
+                } else {
+                    mann_whitney_exact_cdf(4, 6, u - 1)
+                };
+            let mirrored = mann_whitney_exact_cdf(4, 6, 24 - u);
+            assert!(close(upper, mirrored, 1e-12), "u = {u}");
+            assert!(lower > 0.0);
+        }
+        // P(U ≤ 2) for 4 vs 6: partitions of 0, 1, 2 into ≤ 4 parts ≤ 6 are
+        // 1, 1, 2 out of C(10, 4) = 210.
+        assert!(close(mann_whitney_exact_cdf(4, 6, 2), 4.0 / 210.0, 1e-12));
     }
 
     #[test]

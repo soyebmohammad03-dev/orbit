@@ -429,3 +429,49 @@ async fn unfinished_and_reliability_experiments() {
         "unsupported_experiment_kind",
     );
 }
+
+#[tokio::test]
+async fn sets_of_runs_are_compared_on_their_medians() {
+    let api = TestApi::with_lab();
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let id = start(&api, perf("integrity-verification", 1, 3)).await;
+        finished(&api, &id).await;
+        ids.push(id);
+    }
+    let (status, body) = api
+        .post(
+            "/api/v1/lab/performance/compare-runs",
+            json!({ "baseline": &ids[..2], "candidates": &ids[2..] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let c = &body["comparison"];
+    assert_eq!(c["runs"], json!([2, 2]));
+    assert!(
+        c["test"].is_null(),
+        "two runs per side are too few for the test"
+    );
+    assert!((c["min_achievable_p"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-12);
+    assert_eq!(body["baseline_runs"].as_array().unwrap().len(), 2);
+    for bad in [
+        json!({ "baseline": [], "candidates": [&ids[0]] }),
+        json!({ "baseline": [&ids[0]], "candidates": [&ids[1]], "alpha": 0.9 }),
+    ] {
+        let (status, body) = api.post("/api/v1/lab/performance/compare-runs", bad).await;
+        assert_error(status, &body, StatusCode::BAD_REQUEST, "invalid_parameter");
+    }
+    // Unknown fields are rejected by the body schema, like every JSON body here.
+    let (status, body) = api
+        .post(
+            "/api/v1/lab/performance/compare-runs",
+            json!({ "baseline": [&ids[0]], "candidates": [&ids[1]], "extra": 1 }),
+        )
+        .await;
+    assert_error(
+        status,
+        &body,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_body",
+    );
+}

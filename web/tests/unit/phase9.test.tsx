@@ -99,6 +99,21 @@ describe("performance results", () => {
         expect(screen.getByRole("list", { name: "Not computed" })).toHaveTextContent("no interval of the mean");
     });
 
+    it("says when a measurement was taken inside the API process, and shows its overhead", () => {
+        const base = perfResult();
+        render(
+            <PerformanceSummary
+                record={record({
+                    ...base,
+                    environment: { ...base.environment, process: "orbit-api" },
+                    overhead: { prepare_ns: 2_000_000, iterations_wall_ns: 9_000, untimed_ns: 3_000 },
+                })}
+            />,
+        );
+        expect(screen.getByText(/Inside the API server, which also serves requests/)).toBeInTheDocument();
+        expect(screen.getByText(/untimed setup and checks 3 µs of 9 µs/)).toBeInTheDocument();
+    });
+
     it("says a pending measurement runs in the background and cannot be cancelled", () => {
         render(<PerformanceSummary record={record(null)} />);
         expect(screen.getByRole("status")).toHaveTextContent("cannot be cancelled");

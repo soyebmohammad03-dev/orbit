@@ -757,6 +757,8 @@ export interface PerformanceEnvironment {
     available_parallelism: number | null;
     build_profile: string;
     build: BuildInfo;
+    /** Executable that took the measurement (`orbit-lab` CLI or `orbit-api`); absent in older results. */
+    process?: string | null;
 }
 
 export interface PerformanceResult {
@@ -772,6 +774,8 @@ export interface PerformanceResult {
     samples_ns: number[];
     summary: StatsSummary;
     throughput_per_second_at_median: number | null;
+    /** Time around the timed sections; absent in older results. */
+    overhead?: { prepare_ns: number; iterations_wall_ns: number; untimed_ns: number } | null;
     limitations: string[];
 }
 

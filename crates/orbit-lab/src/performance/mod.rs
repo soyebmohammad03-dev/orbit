@@ -55,7 +55,7 @@ use crate::registry::{
 use crate::reproduction::ReproductionStatus;
 use crate::{ExperimentRecord, Lab};
 
-pub use compare::{Comparison, RegressionPolicy, Verdict};
+pub use compare::{Comparison, RegressionPolicy, RunComparison, Verdict};
 pub use stats::Summary;
 
 /// Experiment kind of performance experiments.
@@ -338,6 +338,12 @@ pub struct Environment {
     pub build_profile: String,
     /// The build.
     pub build: BuildInfo,
+    /// File name of the executable that took the measurement (`orbit-lab`
+    /// for the CLI, `orbit-api` when started through the API, whose other
+    /// requests share the process). Absent in results recorded before it
+    /// was added.
+    #[serde(default)]
+    pub process: Option<String>,
 }
 
 impl Environment {
@@ -357,8 +363,24 @@ impl Environment {
             }
             .to_owned(),
             build: BuildInfo::current(),
+            process: std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())),
         }
     }
+}
+
+/// Wall-clock time spent around the timed sections, so that orchestration
+/// cost is visible apart from the samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overhead {
+    /// Preparing the workload (creating and seeding its files), ns.
+    pub prepare_ns: u64,
+    /// The whole warm-up and measured loop, ns.
+    pub iterations_wall_ns: u64,
+    /// Of that loop, the time outside the timed operation (per-iteration
+    /// setup and result checks), ns.
+    pub untimed_ns: u64,
 }
 
 /// The result document of a performance experiment.
@@ -388,6 +410,10 @@ pub struct PerformanceResult {
     pub summary: Value,
     /// `input_size / median`, in input units per second.
     pub throughput_per_second_at_median: Option<f64>,
+    /// Time around the timed sections. Absent in results recorded before it
+    /// was added.
+    #[serde(default)]
+    pub overhead: Option<Overhead>,
     /// What these numbers do and do not show.
     pub limitations: Vec<String>,
 }
@@ -421,8 +447,10 @@ pub fn measure(
     std::fs::create_dir_all(work).map_err(|e| infra(&e))?;
     let outcome = (|| {
         let n = spec.input_size.unwrap_or(info.input_size.default);
+        let preparing = Instant::now();
         let mut workload =
             workloads::prepare(info.id, work, n, spec.seed.unwrap_or(1)).map_err(|e| infra(&e))?;
+        let prepare_ns = u64::try_from(preparing.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let mut run = |count: u64, offset: u64| -> std::result::Result<Vec<u64>, Failure> {
             let mut samples = Vec::new();
             for k in 0..count {
@@ -444,12 +472,20 @@ pub fn measure(
         };
         let warmup = spec.warmup_iterations.unwrap_or(WARMUP.default);
         let measured = spec.measured_iterations.unwrap_or(MEASURED.default);
+        let looping = Instant::now();
         let warmup_samples = run(warmup, 0)?;
         let samples = run(measured, warmup)?;
-        Ok((n, warmup_samples, samples))
+        let iterations_wall_ns = u64::try_from(looping.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let timed: u64 = warmup_samples.iter().chain(&samples).sum();
+        let overhead = Overhead {
+            prepare_ns,
+            iterations_wall_ns,
+            untimed_ns: iterations_wall_ns.saturating_sub(timed),
+        };
+        Ok((n, warmup_samples, samples, overhead))
     })();
     let _ = std::fs::remove_dir_all(work);
-    let (n, warmup_samples_ns, samples_ns) = outcome?;
+    let (n, warmup_samples_ns, samples_ns, overhead) = outcome?;
     #[allow(clippy::cast_precision_loss)]
     let as_f64: Vec<f64> = samples_ns.iter().map(|s| *s as f64).collect();
     let summary = Summary::of(&as_f64)
@@ -489,6 +525,7 @@ pub fn measure(
         summary: serde_json::to_value(&summary)
             .map_err(|e| Failure::new(FailureKind::Internal, e.to_string()))?,
         throughput_per_second_at_median: throughput,
+        overhead: Some(overhead),
         limitations: LIMITATIONS.iter().map(|s| (*s).to_owned()).collect(),
     })
 }
@@ -678,6 +715,49 @@ impl Lab {
             "baseline": provenance(&baseline, &base),
             "comparisons": comparisons,
             "policy": policy,
+        }))
+    }
+
+    /// Compares two sets of independent runs (completed performance
+    /// experiments) on their per-run medians (see [`compare::compare_runs`]).
+    /// Nothing is stored.
+    ///
+    /// # Errors
+    /// [`LabError::InvalidSpec`] for fewer than 1 or more than
+    /// [`compare::MAX_RUNS`] runs per side; [`LabError::ExperimentNotFound`];
+    /// [`LabError::InvalidState`] for an experiment that is not a completed
+    /// performance experiment.
+    pub fn compare_performance_runs(
+        &self,
+        baseline: &[ExperimentId],
+        candidate: &[ExperimentId],
+        policy: &RegressionPolicy,
+    ) -> Result<Value> {
+        for (field, ids) in [("baseline", baseline), ("candidates", candidate)] {
+            if ids.is_empty() || ids.len() > compare::MAX_RUNS {
+                return Err(LabError::InvalidSpec {
+                    field,
+                    reason: format!("1 to {} experiment ids are required", compare::MAX_RUNS),
+                });
+            }
+        }
+        let load = |ids: &[ExperimentId]| -> Result<(Vec<PerformanceResult>, Vec<Value>)> {
+            let mut results = Vec::new();
+            let mut provenance_list = Vec::new();
+            for id in ids {
+                let record = self.experiment(*id)?;
+                let result = result_of(&record)?;
+                provenance_list.push(provenance(&record, &result));
+                results.push(result);
+            }
+            Ok((results, provenance_list))
+        };
+        let (b, bp) = load(baseline)?;
+        let (k, kp) = load(candidate)?;
+        Ok(json!({
+            "baseline_runs": bp,
+            "candidate_runs": kp,
+            "comparison": compare::compare_runs(&b, &k, policy),
         }))
     }
 

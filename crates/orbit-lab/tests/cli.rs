@@ -5,7 +5,7 @@ mod common;
 use std::process::Command;
 
 use common::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn cli(env: &Env, args: &[&str]) -> (bool, Value, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_orbit-lab"))
@@ -199,4 +199,52 @@ fn export_validate_import_and_reproduce_a_bundle_from_the_command_line() {
     assert_eq!(report["errors"][0]["code"], "truncated");
     let (ok, _, err) = cli(&env, &["import", file]);
     assert!(!ok && err.contains("nothing was imported"), "{err}");
+}
+
+#[test]
+fn compare_independent_runs_from_the_command_line() {
+    let env = Env::new();
+    let measure = || {
+        let (ok, record, err) = cli(
+            &env,
+            &[
+                "measure",
+                "integrity-verification",
+                "--input-size",
+                "20",
+                "--warmup",
+                "0",
+                "--iterations",
+                "3",
+            ],
+        );
+        assert!(ok, "{err}");
+        record["id"].as_str().unwrap().to_owned()
+    };
+    let base: Vec<String> = (0..3).map(|_| measure()).collect();
+    let cand: Vec<String> = (0..3).map(|_| measure()).collect();
+    let (ok, out, err) = cli(
+        &env,
+        &[
+            "compare-runs",
+            "--baseline",
+            &base.join(","),
+            "--candidate",
+            &cand.join(","),
+            "--alpha",
+            "0.05",
+        ],
+    );
+    assert!(ok, "{err}");
+    let c = &out["comparison"];
+    assert_eq!(c["runs"], json!([3, 3]));
+    assert_eq!(out["baseline_runs"].as_array().unwrap().len(), 3);
+    // With three runs per side the smallest possible p is 0.1, so no
+    // verdict can be a statistically supported change.
+    assert!((c["min_achievable_p"].as_f64().unwrap() - 0.1).abs() < 1e-12);
+    assert!(
+        !["regression", "improvement", "incompatible"].contains(&c["verdict"].as_str().unwrap())
+    );
+    let (ok, _, err) = cli(&env, &["compare-runs", "--baseline", &base[0]]);
+    assert!(!ok && err.contains("--candidate"), "{err}");
 }

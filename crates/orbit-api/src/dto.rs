@@ -565,6 +565,20 @@ pub struct CompareRequest {
     pub alpha: Option<f64>,
 }
 
+/// Body of `POST /api/v1/lab/performance/compare-runs`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompareRunsRequest {
+    /// Baseline runs (1–20 experiment ids).
+    pub baseline: Vec<String>,
+    /// Candidate runs (1–20 experiment ids).
+    pub candidates: Vec<String>,
+    /// Threshold in percent (0.1–100, default 10).
+    pub threshold_percent: Option<f64>,
+    /// Significance level (0.0001–0.1, default 0.01).
+    pub alpha: Option<f64>,
+}
+
 /// Query of `GET /api/v1/lab/bundles`.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

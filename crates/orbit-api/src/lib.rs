@@ -286,6 +286,10 @@ pub fn router(state: AppState, cors_origins: &[String]) -> Router {
         )
         .route("/lab/performance/compare", post(lab::compare_performance))
         .route(
+            "/lab/performance/compare-runs",
+            post(lab::compare_performance_runs),
+        )
+        .route(
             "/lab/bundles",
             get(evidence::list_bundles)
                 .post(evidence::import_bundle)

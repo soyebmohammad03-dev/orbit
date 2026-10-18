@@ -178,6 +178,26 @@ export function PerformanceSummary({ record }: { record: ExperimentRecord }) {
                                         {`${result.environment.os}/${result.environment.arch} · ${result.environment.build_profile} build · ${result.environment.available_parallelism ?? "?"} CPUs`}
                                     </Mono>,
                                 ],
+                                [
+                                    "Measured by",
+                                    <span key="proc" className="flex flex-col">
+                                        <Mono>{result.environment.process ?? "not recorded"}</Mono>
+                                        {result.environment.process === "orbit-api" ? (
+                                            <span className="text-xs text-warn">
+                                                Inside the API server, which also serves requests. The CLI (orbit-lab
+                                                measure) measures in a process of its own.
+                                            </span>
+                                        ) : null}
+                                    </span>,
+                                ],
+                                [
+                                    "Orchestration overhead",
+                                    <Mono key="ovh">
+                                        {result.overhead
+                                            ? `prepare ${formatNanos(result.overhead.prepare_ns)} · untimed setup and checks ${formatNanos(result.overhead.untimed_ns)} of ${formatNanos(result.overhead.iterations_wall_ns)} loop time`
+                                            : "not recorded"}
+                                    </Mono>,
+                                ],
                                 ["Configuration digest", <Digest key="cd" value={result.configuration_digest} />],
                                 [
                                     "Warm-up samples",

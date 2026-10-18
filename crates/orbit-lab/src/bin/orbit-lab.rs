@@ -19,6 +19,9 @@
 //!                                     run a performance experiment
 //!   compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]
 //!                                     compare performance experiments
+//!   compare-runs --baseline ID,ID,… --candidate ID,ID,… [--threshold P] [--alpha A]
+//!                                     compare sets of independent runs on
+//!                                     their per-run medians
 //!   export ID --out FILE              write an evidence bundle (with the
 //!                                     input history when --db has it)
 //!   validate FILE                     validate a bundle; nothing is stored
@@ -51,6 +54,7 @@ const USAGE: &str = "usage: orbit-lab [--db PATH] [--lab DIR] <implementations|r
   workloads
   measure WORKLOAD [--input-size N] [--warmup N] [--iterations N] [--seed N]
   compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]
+  compare-runs --baseline ID,ID,... --candidate ID,ID,... [--threshold PERCENT] [--alpha A]
   export ID --out FILE | validate FILE | import FILE | bundles [--limit N] | reproduce-bundle DIGEST";
 
 struct Args {
@@ -244,6 +248,29 @@ fn main_inner() -> Result<Value, String> {
             let limit = usize::try_from(limit).map_err(|_| "--limit is too large")?;
             let from = number(&args.rest, "--from")?;
             json(&lab.trace(id, from, limit).map_err(|e| e.to_string())?)?
+        }
+        "compare-runs" => {
+            let ids = |name: &str| -> Result<Vec<ExperimentId>, String> {
+                option(&args.rest, name)
+                    .ok_or_else(|| format!("compare-runs needs {name} ID,ID,..."))?
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse::<ExperimentId>().map_err(|e| e.to_string()))
+                    .collect()
+            };
+            let float = |name: &str, default: f64| -> Result<f64, String> {
+                option(&args.rest, name).map_or(Ok(default), |v| {
+                    v.parse().map_err(|_| format!("{name} needs a number"))
+                })
+            };
+            let defaults = RegressionPolicy::default();
+            let policy = RegressionPolicy {
+                threshold_percent: float("--threshold", defaults.threshold_percent)?,
+                alpha: float("--alpha", defaults.alpha)?,
+            }
+            .validated()?;
+            lab.compare_performance_runs(&ids("--baseline")?, &ids("--candidate")?, &policy)
+                .map_err(|e| e.to_string())?
         }
         "export" => {
             let id = experiment_id(&args.rest)?;

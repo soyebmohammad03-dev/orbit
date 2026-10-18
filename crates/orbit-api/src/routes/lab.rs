@@ -14,8 +14,8 @@ use serde_json::Value;
 use super::page_limit;
 use crate::AppState;
 use crate::dto::{
-    ArtifactVerificationResponse, CompareRequest, CreateExperimentRequest, ExperimentDetail,
-    ExperimentPage, ExperimentPageQuery, ImplementationList, TraceQuery,
+    ArtifactVerificationResponse, CompareRequest, CompareRunsRequest, CreateExperimentRequest,
+    ExperimentDetail, ExperimentPage, ExperimentPageQuery, ImplementationList, TraceQuery,
 };
 use crate::error::{ApiError, ErrorResponse};
 use crate::extract::{ApiJson, ApiPath, ApiQuery};
@@ -507,6 +507,52 @@ pub async fn compare_performance(
     with_lab(&state, move |lab, _| {
         Ok(ApiJson(lab.compare_performance(
             baseline,
+            &candidates,
+            &policy,
+        )?))
+    })
+    .await
+}
+
+/// Compares two sets of independent runs (completed performance
+/// experiments of one configuration) on their per-run medians; the test is
+/// exact for small run counts and reports the smallest p-value the counts
+/// allow. Nothing is stored.
+#[utoipa::path(post, path = "/api/v1/lab/performance/compare-runs", tag = "lab",
+    request_body = CompareRunsRequest,
+    responses((status = 200, description = "The run comparison", body = Object),
+              (status = 400, body = ErrorResponse), (status = 404, body = ErrorResponse),
+              (status = 409, description = "Not a completed performance experiment", body = ErrorResponse)))]
+pub async fn compare_performance_runs(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<CompareRunsRequest>,
+) -> Result<ApiJson<Value>, ApiError> {
+    let max = orbit_lab::performance::compare::MAX_RUNS;
+    if [&body.baseline, &body.candidates]
+        .iter()
+        .any(|v| v.is_empty() || v.len() > max)
+    {
+        return Err(ApiError::bad_request(
+            "invalid_parameter",
+            format!("baseline and candidates must each hold 1 to {max} experiment ids"),
+        ));
+    }
+    let parse = |v: &[String]| {
+        v.iter()
+            .map(|c| experiment_id(c))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let (baseline, candidates) = (parse(&body.baseline)?, parse(&body.candidates)?);
+    let defaults = RegressionPolicy::default();
+    let policy = RegressionPolicy {
+        threshold_percent: body.threshold_percent.unwrap_or(defaults.threshold_percent),
+        alpha: body.alpha.unwrap_or(defaults.alpha),
+    }
+    .validated()
+    .map_err(|e| ApiError::bad_request("invalid_parameter", e))?;
+    with_lab(&state, move |lab, _| {
+        Ok(ApiJson(lab.compare_performance_runs(
+            &baseline,
             &candidates,
             &policy,
         )?))
