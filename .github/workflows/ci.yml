@@ -65,6 +65,24 @@ jobs:
           cargo run -p orbit-lab --locked -- --lab target/ci-lab validate crates/orbit-lab/tests/fixtures/bundles/valid-differential.json | grep -q '"valid": true'
           cargo run -p orbit-lab --locked -- --lab target/ci-lab validate crates/orbit-lab/tests/fixtures/bundles/truncated.json | grep -q '"code": "truncated"'
 
+  audit:
+    name: dependency audit (RustSec and npm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: RustSec advisories for Cargo.lock
+        run: cargo audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: npm advisories for production dependencies
+        working-directory: web
+        run: npm audit --omit=dev
+
   web:
     name: web (lint, types, unit tests, build)
     runs-on: ubuntu-latest
