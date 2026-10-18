@@ -56,6 +56,7 @@ jobs:
           cargo run -p orbit-core --example time_travel --locked
           cargo run -p orbit-core --example crash_lab --locked
           cargo run -p orbit-lab --locked -- --lab target/ci-lab implementations
+          cargo run -p orbit-lab --example large_history --locked -- 500
 
   web:
     name: web (lint, types, unit tests, build)
