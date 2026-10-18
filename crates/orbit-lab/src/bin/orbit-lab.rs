@@ -11,9 +11,18 @@
 //!   list [--limit N]                  newest experiments first
 //!   show ID                           one experiment, as JSON
 //!   verify ID                         check stored digests and artifacts
-//!   reproduce ID                      execute again and compare
+//!   reproduce ID                      execute again and compare (a
+//!                                     performance experiment is measured again)
 //!   trace ID [--from N] [--limit N]   per-boundary state digests
+//!   workloads                         list the performance workloads
+//!   measure WORKLOAD [--input-size N] [--warmup N] [--iterations N] [--seed N]
+//!                                     run a performance experiment
+//!   compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]
+//!                                     compare performance experiments
 //! ```
+//!
+//! Performance numbers from a debug build are labelled `smoke`; measure
+//! with `cargo run --release -p orbit-lab -- measure …`.
 //!
 //! `--db` defaults to `$ORBIT_DB_PATH` or `data/orbit.db`; `--lab` to
 //! `$ORBIT_LAB_DIR` or `data/lab`. The event store must already exist; the
@@ -23,15 +32,19 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use orbit_core::{EventStore, StoreConfig};
+use orbit_lab::performance::{self, PerformanceSpec, RegressionPolicy};
 use orbit_lab::{Catalog, DifferentialSpec, ExperimentId, Lab, Side};
 use serde_json::{Value, json};
 
-const USAGE: &str = "usage: orbit-lab [--db PATH] [--lab DIR] <implementations|run|list|show|verify|reproduce> [options]
+const USAGE: &str = "usage: orbit-lab [--db PATH] [--lab DIR] <implementations|run|list|show|verify|reproduce|trace|workloads|measure|compare> [options]
   run --stream S --left ID --right ID [--from N] [--to N] [--reference left|right] [--no-determinism-check]
   run --spec FILE.json
   list [--limit N]
   show ID | verify ID | reproduce ID
-  trace ID [--from N] [--limit N]";
+  trace ID [--from N] [--limit N]
+  workloads
+  measure WORKLOAD [--input-size N] [--warmup N] [--iterations N] [--seed N]
+  compare [--baseline ID] CANDIDATE... [--threshold PERCENT] [--alpha A]";
 
 struct Args {
     db: PathBuf,
@@ -163,8 +176,60 @@ fn main_inner() -> Result<Value, String> {
         }
         "reproduce" => {
             let id = experiment_id(&args.rest)?;
-            let store = open_store(&args)?;
-            json(&lab.reproduce(id, &store).map_err(|e| e.to_string())?)?
+            let record = lab.experiment(id).map_err(|e| e.to_string())?;
+            if record.kind == performance::PERFORMANCE {
+                let (verification, attempt) = lab
+                    .reproduce_performance(id, &RegressionPolicy::default())
+                    .map_err(|e| e.to_string())?;
+                json!({ "verification": verification, "attempt": attempt })
+            } else {
+                let store = open_store(&args)?;
+                json(&lab.reproduce(id, &store).map_err(|e| e.to_string())?)?
+            }
+        }
+        "workloads" => json(&performance::WORKLOADS)?,
+        "measure" => {
+            let workload = args
+                .rest
+                .first()
+                .filter(|w| !w.starts_with("--"))
+                .ok_or("measure needs a workload id (see `workloads`)")?;
+            let spec = PerformanceSpec {
+                workload: workload.clone(),
+                workload_version: None,
+                input_size: number(&args.rest, "--input-size")?,
+                warmup_iterations: number(&args.rest, "--warmup")?,
+                measured_iterations: number(&args.rest, "--iterations")?,
+                seed: number(&args.rest, "--seed")?,
+            };
+            json(&lab.measure_performance(&spec).map_err(|e| e.to_string())?)?
+        }
+        "compare" => {
+            let baseline = option(&args.rest, "--baseline")
+                .map(|v| v.parse::<ExperimentId>().map_err(|e| e.to_string()))
+                .transpose()?;
+            let mut candidates = Vec::new();
+            let mut rest = args.rest.iter();
+            while let Some(a) = rest.next() {
+                if a.starts_with("--") {
+                    rest.next();
+                } else {
+                    candidates.push(a.parse::<ExperimentId>().map_err(|e| e.to_string())?);
+                }
+            }
+            let float = |name: &str, default: f64| -> Result<f64, String> {
+                option(&args.rest, name).map_or(Ok(default), |v| {
+                    v.parse().map_err(|_| format!("{name} needs a number"))
+                })
+            };
+            let defaults = RegressionPolicy::default();
+            let policy = RegressionPolicy {
+                threshold_percent: float("--threshold", defaults.threshold_percent)?,
+                alpha: float("--alpha", defaults.alpha)?,
+            }
+            .validated()?;
+            lab.compare_performance(baseline, &candidates, &policy)
+                .map_err(|e| e.to_string())?
         }
         "trace" => {
             let id = experiment_id(&args.rest)?;

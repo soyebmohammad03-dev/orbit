@@ -102,3 +102,51 @@ fn errors_exit_non_zero_with_a_message() {
     assert!(!ok);
     assert!(err.contains("unknown command"), "{err}");
 }
+
+#[test]
+fn measure_compare_and_reproduce_performance_from_the_command_line() {
+    let env = Env::new();
+    let (ok, workloads, _) = cli(&env, &["workloads"]);
+    assert!(ok);
+    assert_eq!(workloads.as_array().unwrap().len(), 7);
+    let measure = |seed: &str| {
+        let (ok, record, err) = cli(
+            &env,
+            &[
+                "measure",
+                "integrity-verification",
+                "--input-size",
+                "20",
+                "--warmup",
+                "0",
+                "--iterations",
+                "3",
+                "--seed",
+                seed,
+            ],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(record["status"], "completed");
+        record["id"].as_str().unwrap().to_owned()
+    };
+    let (a, b, other) = (measure("1"), measure("1"), measure("9"));
+    let (ok, cmp, err) = cli(&env, &["compare", "--baseline", &a, &b, &other]);
+    assert!(ok, "{err}");
+    assert_eq!(cmp["status"], "compared");
+    assert_ne!(
+        cmp["comparisons"][0]["comparison"]["verdict"],
+        "incompatible"
+    );
+    assert_eq!(
+        cmp["comparisons"][1]["comparison"]["verdict"],
+        "incompatible"
+    );
+    let (ok, _, err) = cli(&env, &["compare", &a, "--threshold", "0"]);
+    assert!(!ok && err.contains("threshold_percent"), "{err}");
+    let (ok, repro, err) = cli(&env, &["reproduce", &a]);
+    assert!(ok, "{err}");
+    assert_eq!(repro["verification"]["kind"], "reproduction");
+    assert_eq!(repro["attempt"]["status"], "completed");
+    let (ok, _, err) = cli(&env, &["measure", "event-append", "--input-size", "0"]);
+    assert!(!ok && err.contains("input_size"), "{err}");
+}

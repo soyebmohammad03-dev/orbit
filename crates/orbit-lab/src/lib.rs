@@ -42,6 +42,7 @@ pub mod error;
 pub mod fault;
 pub mod identity;
 pub mod lab;
+pub mod performance;
 pub mod registry;
 pub mod reliability;
 pub mod reproduction;
