@@ -35,10 +35,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Clippy (libraries with default features, i.e. the production build without fault hooks)
         run: cargo clippy --workspace --lib --locked -- -D warnings
-      - name: The API build has no fault-injection hooks
+      - name: The API build has no fault-injection or reliability features
         run: |
-          if cargo tree -p orbit-api -e features --locked | grep -q fault-injection; then
-            echo "orbit-api enables orbit-core/fault-injection" >&2
+          if cargo tree -p orbit-api -e features --locked | grep -Eq 'fault-injection|"reliability"'; then
+            echo "orbit-api enables orbit-core/fault-injection or orbit-lab/reliability" >&2
             exit 1
           fi
       - name: Test
@@ -99,6 +99,17 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Build the API
         run: cargo build -p orbit-api --locked
+      - name: The API binary contains no reliability child or fault code
+        run: |
+          # Strings that exist only in orbit-lab's `reliability` feature
+          # (child-process roles). The API is built on its own above, so no
+          # test-only feature is unified into it.
+          for marker in "not-faulted" "child error: " "append_forever"; do
+            if LC_ALL=C grep -a -q "$marker" target/debug/orbit-api; then
+              echo "orbit-api contains reliability code ($marker)" >&2
+              exit 1
+            fi
+          done
       - name: Install web dependencies and Chromium
         working-directory: web
         run: |
