@@ -616,6 +616,16 @@ export interface ScenarioInfo {
     parameters: { name: string; description: string; default: number; min: number; max: number }[];
 }
 
+/** Whether this server can launch reliability runs (a separately configured runner). */
+export type ReliabilityRunner =
+    { enabled: false; reason: string } | { enabled: true; timeout_secs: number; busy: boolean };
+
+export interface ReliabilityCatalogResponse {
+    scenarios: ScenarioInfo[];
+    runner: ReliabilityRunner;
+    execution: string;
+}
+
 export interface InvariantCheck {
     name: string;
     expected: string;

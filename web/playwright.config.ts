@@ -1,6 +1,6 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
 
@@ -29,8 +29,11 @@ export default defineConfig({
     projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
     webServer: [
         {
-            // The real API over a real, empty SQLite file.
-            command: "cargo run --quiet -p orbit-api",
+            // The real API over a real, empty SQLite file, with reliability
+            // launching enabled through the separately built runner (the API
+            // binary itself has no fault-injection code; CI checks that).
+            command:
+                "cargo build --quiet -p orbit-lab --features reliability --bin orbit-reliability && cargo run --quiet -p orbit-api",
             cwd: "..",
             url: `${API_URL}/health`,
             timeout: 300_000,
@@ -42,6 +45,8 @@ export default defineConfig({
                 ORBIT_API_CORS_ORIGINS: WEB_URL,
                 ORBIT_BENCHMARK_DIR: "",
                 ORBIT_DURABILITY: "normal",
+                ORBIT_RELIABILITY_RUNNER: resolve("..", "target", "debug", "orbit-reliability"),
+                ORBIT_RELIABILITY_TIMEOUT_SECS: "300",
             },
         },
         {

@@ -33,7 +33,7 @@ import type {
     StoredEvent,
     StreamDetail,
     StreamPage,
-    ScenarioInfo,
+    ReliabilityCatalogResponse,
     TracePage,
     BundleVerification,
     CompareResponse,
@@ -202,7 +202,10 @@ export function createClient(options: ClientOptions = {}) {
         getLabExperiment: (id: string) => get<ExperimentDetail>(`/lab/experiments/${seg(id)}`),
         verifyLabExperiment: (id: string) => post<ArtifactVerificationResponse>(`/lab/experiments/${seg(id)}/verify`),
         reproduceLabExperiment: (id: string) => post<VerificationRecord>(`/lab/experiments/${seg(id)}/reproduce`),
-        reliabilityScenarios: () => get<{ scenarios: ScenarioInfo[]; execution: string }>("/lab/reliability/scenarios"),
+        reliabilityScenarios: () => get<ReliabilityCatalogResponse>("/lab/reliability/scenarios"),
+        /** Accepted (202): the experiment in status `created`, run by the server's separate runner process. */
+        launchReliability: (spec: { scenario: string; parameters: Record<string, number> }) =>
+            post<ExperimentRecord>("/lab/reliability/runs", spec),
         getLabTrace: (id: string, p: { from?: number; limit?: number } = {}) =>
             get<TracePage>(`/lab/experiments/${seg(id)}/trace${query(p)}`),
 

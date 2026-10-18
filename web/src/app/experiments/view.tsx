@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { ReliabilityCatalog, ReliabilitySummary } from "./reliability";
 import { PerformanceSummary } from "@/components/performance";
@@ -67,7 +67,12 @@ function ReproducibilityBadge({ value }: { value: string | null }) {
 export function ExperimentsView() {
     const [experimentId, setExperiment] = useQueryParam("experiment");
     const [refresh, setRefresh] = useState(0);
-    const list = useApi(() => api.listLabExperiments({ limit: 100 }), `lab:list:${refresh}`);
+    const list = useApi(() => api.listLabExperiments({ limit: 100 }), "lab:list");
+    // A stable key keeps the table on screen while it reloads.
+    const { reload: reloadList } = list;
+    useEffect(() => {
+        if (refresh > 0) reloadList();
+    }, [refresh, reloadList]);
 
     return (
         <>
@@ -147,7 +152,12 @@ export function ExperimentsView() {
                             setExperiment(id);
                         }}
                     />
-                    <ReliabilityCatalog />
+                    <ReliabilityCatalog
+                        onLaunched={(id) => {
+                            setRefresh((n) => n + 1);
+                            setExperiment(id);
+                        }}
+                    />
                 </div>
             </div>
         </>
@@ -268,6 +278,12 @@ function ExperimentPanel({ id, onChanged }: { id: string; onChanged: () => void 
         }, 1000);
         return () => clearInterval(timer);
     }, [waiting, attempt, poll, onChanged]);
+    // When background work finishes, the list's status changes too.
+    const wasWaiting = useRef(false);
+    useEffect(() => {
+        if (wasWaiting.current && !waiting) onChanged();
+        wasWaiting.current = waiting;
+    }, [waiting, onChanged]);
     if (detail.loading && !detail.data) return <Loading />;
     if (detail.error) return <ErrorState error={detail.error} onRetry={detail.reload} />;
     if (!detail.data) return null;

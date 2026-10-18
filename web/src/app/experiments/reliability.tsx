@@ -1,10 +1,26 @@
 "use client";
 
-import { Badge, Card, ErrorState, KeyValue, Loading, Mono, Table, Td, Th } from "@/components/ui";
+import { useState } from "react";
+
+import {
+    Badge,
+    Button,
+    Card,
+    ErrorState,
+    Field,
+    Input,
+    KeyValue,
+    Loading,
+    Mono,
+    Select,
+    Table,
+    Td,
+    Th,
+} from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatMicros } from "@/lib/format";
-import type { ExperimentRecord, FailureMode, ReliabilityCase, ReliabilityResult } from "@/lib/types";
-import { useApi } from "@/lib/use-api";
+import type { ExperimentRecord, FailureMode, ReliabilityCase, ReliabilityResult, ScenarioInfo } from "@/lib/types";
+import { useAction, useApi } from "@/lib/use-api";
 
 const MODE_LABELS: Record<FailureMode, string> = {
     simulated_error: "simulated error",
@@ -111,6 +127,13 @@ export function ReliabilitySummary({ record }: { record: ExperimentRecord }) {
                         ["Elapsed", record.elapsed_micros === null ? "—" : formatMicros(record.elapsed_micros)],
                     ]}
                 />
+                {record.status === "created" || record.status === "running" ? (
+                    <p role="status" className="mt-3 text-sm text-muted">
+                        {record.status === "created"
+                            ? "Recorded; waiting for the runner process to start it."
+                            : "Running in the runner process. This page refreshes until it finishes."}
+                    </p>
+                ) : null}
                 {record.failure ? (
                     <div role="alert" className="mt-4 rounded-md border border-fail/30 bg-fail-soft p-3 text-sm">
                         <p className="font-medium text-fail">{record.failure.kind.replaceAll("_", " ")}</p>
@@ -170,8 +193,12 @@ export function ReliabilitySummary({ record }: { record: ExperimentRecord }) {
     );
 }
 
-/** The supported scenarios. They are run with the CLI, never from this page. */
-export function ReliabilityCatalog() {
+/**
+ * The supported scenarios. When the server has a separately configured
+ * runner (`ORBIT_RELIABILITY_RUNNER`), a scenario from this catalog can be
+ * launched; the API itself never injects faults.
+ */
+export function ReliabilityCatalog({ onLaunched }: { onLaunched?: (id: string) => void }) {
     const catalog = useApi(() => api.reliabilityScenarios(), "lab:reliability:scenarios");
     return (
         <Card title="Reliability scenarios">
@@ -179,12 +206,6 @@ export function ReliabilityCatalog() {
             {catalog.error ? <ErrorState error={catalog.error} onRetry={catalog.reload} /> : null}
             {catalog.data ? (
                 <div className="flex flex-col gap-3 text-sm">
-                    <p className="text-xs text-muted">
-                        These inject faults and kill processes, so the API cannot start them. Run one with:
-                    </p>
-                    <code className="break-all rounded bg-bg px-2 py-1 font-mono text-xs">
-                        cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run &lt;scenario&gt;
-                    </code>
                     <ul aria-label="Reliability scenarios" className="flex flex-col gap-2">
                         {catalog.data.scenarios.map((s) => (
                             <li key={s.id}>
@@ -193,8 +214,114 @@ export function ReliabilityCatalog() {
                             </li>
                         ))}
                     </ul>
+                    {catalog.data.runner.enabled ? (
+                        <LaunchForm
+                            scenarios={catalog.data.scenarios}
+                            timeout={catalog.data.runner.timeout_secs}
+                            busy={catalog.data.runner.busy}
+                            onLaunched={(id) => {
+                                catalog.reload();
+                                onLaunched?.(id);
+                            }}
+                        />
+                    ) : (
+                        <div role="note" className="flex flex-col gap-2 text-xs text-muted">
+                            <p>
+                                Launching is disabled on this server. Scenarios inject faults and kill processes, so
+                                only the separately built <Mono>orbit-reliability</Mono> runner can execute them. To
+                                launch from here, start the API with <Mono>ORBIT_RELIABILITY_RUNNER</Mono> set to its
+                                absolute path, or run one directly:
+                            </p>
+                            <code className="break-all rounded bg-bg px-2 py-1 font-mono">
+                                cargo run -p orbit-lab --features reliability --bin orbit-reliability -- run
+                                &lt;scenario&gt;
+                            </code>
+                        </div>
+                    )}
                 </div>
             ) : null}
         </Card>
+    );
+}
+
+function LaunchForm({
+    scenarios,
+    timeout,
+    busy,
+    onLaunched,
+}: {
+    scenarios: ScenarioInfo[];
+    timeout: number;
+    busy: boolean;
+    onLaunched: (id: string) => void;
+}) {
+    const [scenarioId, setScenario] = useState(scenarios[0]?.id ?? "");
+    const scenario = scenarios.find((s) => s.id === scenarioId) ?? scenarios[0];
+    const [values, setValues] = useState<Record<string, string>>({});
+    const launch = useAction((spec: { scenario: string; parameters: Record<string, number> }) =>
+        api.launchReliability(spec),
+    );
+    if (!scenario) return null;
+    const invalid = scenario.parameters.some((p) => {
+        const v = values[`${scenario.id}:${p.name}`];
+        return v !== undefined && v !== "" && (!Number.isInteger(Number(v)) || Number(v) < p.min || Number(v) > p.max);
+    });
+    return (
+        <form
+            aria-label="Launch a reliability scenario"
+            className="flex flex-col gap-3 border-t border-border pt-3"
+            onSubmit={async (e) => {
+                e.preventDefault();
+                const parameters: Record<string, number> = {};
+                for (const p of scenario.parameters) {
+                    const v = values[`${scenario.id}:${p.name}`];
+                    if (v !== undefined && v !== "") parameters[p.name] = Number(v);
+                }
+                const record = await launch.run({ scenario: scenario.id, parameters });
+                if (record) onLaunched(record.id);
+            }}
+        >
+            <Field label="Scenario" htmlFor="rel-scenario" hint={scenario.summary}>
+                <Select id="rel-scenario" value={scenario.id} onChange={(e) => setScenario(e.target.value)}>
+                    {scenarios.map((s) => (
+                        <option key={s.id} value={s.id}>
+                            {s.title}
+                        </option>
+                    ))}
+                </Select>
+            </Field>
+            {scenario.parameters.map((p) => (
+                <Field
+                    key={p.name}
+                    label={`${p.name} (${p.description})`}
+                    htmlFor={`rel-${p.name}`}
+                    hint={`${p.min}–${p.max}, default ${p.default}`}
+                >
+                    <Input
+                        id={`rel-${p.name}`}
+                        type="number"
+                        min={p.min}
+                        max={p.max}
+                        value={values[`${scenario.id}:${p.name}`] ?? ""}
+                        onChange={(e) => setValues((v) => ({ ...v, [`${scenario.id}:${p.name}`]: e.target.value }))}
+                    />
+                </Field>
+            ))}
+            <p className="text-xs text-muted">
+                Runs in the separate runner process, one at a time, stopped after {timeout} s. It works only on files it
+                creates under the lab directory.
+            </p>
+            {invalid ? (
+                <p role="alert" className="text-xs text-fail">
+                    A value is outside its allowed range.
+                </p>
+            ) : null}
+            {launch.error ? <ErrorState title="Scenario not launched" error={launch.error} /> : null}
+            <div>
+                <Button type="submit" variant="primary" busy={launch.pending} disabled={invalid || busy}>
+                    {busy ? "A scenario is running" : "Launch scenario"}
+                </Button>
+            </div>
+        </form>
     );
 }
